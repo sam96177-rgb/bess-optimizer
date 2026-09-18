@@ -1,0 +1,47 @@
+# Every value in this file is an ASSUMPTION, not a measurement
+# (SPEC.md Hard Rule 2). Each entry says what it is, why it's assumed
+# instead of sourced, and what real data would replace it. This file is
+# printed in a banner at the top of every CLI run, and results derived
+# from it must be flagged as assumption-derived wherever they appear.
+
+afrr_activation:
+  # Expected fraction of committed aFRR capacity actually called
+  # (activated) by the TSO in a given block. Assumed because real
+  # activation is stochastic and unknown ahead of time, and a
+  # deterministic MILP needs a point estimate to plan reserve headroom
+  # and expected energy flow around.
+  #
+  # PLACEHOLDER — SPEC.md gives no default for this value (unlike the
+  # reserve-duration figures below, which it does specify). Not sourced
+  # from data. Needs confirmation before Milestone 4, where it first
+  # enters the SOC dynamics (C1) and the objective's activation term.
+  #
+  # Real replacement: activation volumes published on Netztransparenz.de,
+  # aggregated into an empirical activation rate per block/season.
+  alpha_pos: 0.10  # PLACEHOLDER, unconfirmed
+  alpha_neg: 0.10  # PLACEHOLDER, unconfirmed
+
+  # EUR/MWh received for energy actually delivered during an aFRR
+  # activation. Assumed because this repo has no activation-price feed;
+  # regelleistung.net carries only capacity prices, not energy prices.
+  #
+  # PLACEHOLDER — SPEC.md gives no default. Not sourced from data. Needs
+  # confirmation before Milestone 4.
+  #
+  # Real replacement: aFRR energy activation prices from the ENTSO-E
+  # Transparency Platform (NOT regelleistung.net, which is capacity-only).
+  activation_energy_price_eur_mwh: 100.0  # PLACEHOLDER, unconfirmed
+
+reserve_energy_duration:
+  # UNVERIFIED — flagged prominently per SPEC.md §3. These are hours of
+  # energy headroom that must be held in reserve per MW of committed
+  # capacity, to satisfy prequalification rules. They materially change
+  # the result: they eat directly into usable SOC via constraint C2.
+  # SPEC.md supplies these exact default numbers but explicitly asks that
+  # they NOT be treated as settled without confirmation — they have not
+  # been checked against current German regulation.
+  #
+  # Real replacement: current FCR/aFRR prequalification requirements
+  # (BNetzA / regelleistung.net prequalification documentation).
+  fcr_hours: 0.5
+  afrr_hours: 1.0

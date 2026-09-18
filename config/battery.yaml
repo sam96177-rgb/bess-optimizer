@@ -1,0 +1,9 @@
+# Physical battery parameters. These are the SPEC.md §3 "locked decisions"
+# for the v1 test system, not assumptions — they describe a specific
+# battery, not a guess standing in for missing data.
+
+power_mw: 1.0
+energy_mwh: 2.0
+round_trip_efficiency: 0.88
+soc_min_fraction: 0.05
+soc_max_fraction: 0.95

@@ -1,0 +1,143 @@
+import pytest
+import yaml
+
+from src.config import (
+    AssumptionsConfig,
+    BatteryConfig,
+    MarketPriceBasisConfig,
+    SolverConfig,
+    load_assumptions_config,
+    load_battery_config,
+    load_market_price_basis_config,
+    load_solver_config,
+)
+
+
+# ---- battery.yaml -----------------------------------------------------
+
+def test_load_battery_config_reads_real_file():
+    cfg = load_battery_config()
+    assert isinstance(cfg, BatteryConfig)
+    assert cfg.power_mw == 1.0
+    assert cfg.energy_mwh == 2.0
+    assert cfg.round_trip_efficiency == 0.88
+    assert cfg.soc_min_fraction == 0.05
+    assert cfg.soc_max_fraction == 0.95
+
+
+def test_battery_config_rejects_invalid_soc_bounds():
+    with pytest.raises(ValueError, match="soc_min_fraction"):
+        BatteryConfig(
+            power_mw=1.0,
+            energy_mwh=2.0,
+            round_trip_efficiency=0.88,
+            soc_min_fraction=0.95,
+            soc_max_fraction=0.05,
+        )
+
+
+def test_battery_config_rejects_nonpositive_power():
+    with pytest.raises(ValueError, match="power_mw"):
+        BatteryConfig(
+            power_mw=0.0,
+            energy_mwh=2.0,
+            round_trip_efficiency=0.88,
+            soc_min_fraction=0.05,
+            soc_max_fraction=0.95,
+        )
+
+
+def test_load_battery_config_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_battery_config(tmp_path / "does_not_exist.yaml")
+
+
+def test_load_battery_config_missing_key_raises(tmp_path):
+    path = tmp_path / "battery.yaml"
+    path.write_text(yaml.dump({"power_mw": 1.0}), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required keys"):
+        load_battery_config(path)
+
+
+# ---- assumptions.yaml ---------------------------------------------------
+
+def test_load_assumptions_config_reads_real_file():
+    cfg = load_assumptions_config()
+    assert isinstance(cfg, AssumptionsConfig)
+    assert cfg.fcr_reserve_hours == 0.5
+    assert cfg.afrr_reserve_hours == 1.0
+    assert 0 <= cfg.alpha_pos <= 1
+    assert 0 <= cfg.alpha_neg <= 1
+
+
+def test_assumptions_config_rejects_out_of_range_alpha():
+    with pytest.raises(ValueError, match="alpha_pos"):
+        AssumptionsConfig(
+            alpha_pos=1.5,
+            alpha_neg=0.1,
+            activation_energy_price_eur_mwh=100.0,
+            fcr_reserve_hours=0.5,
+            afrr_reserve_hours=1.0,
+        )
+
+
+def test_load_assumptions_config_missing_section_raises(tmp_path):
+    path = tmp_path / "assumptions.yaml"
+    path.write_text(yaml.dump({"afrr_activation": {}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="reserve_energy_duration"):
+        load_assumptions_config(path)
+
+
+# ---- solver.yaml --------------------------------------------------------
+
+def test_load_solver_config_reads_real_file():
+    cfg = load_solver_config()
+    assert isinstance(cfg, SolverConfig)
+    assert cfg.name == "highs"
+    assert cfg.enforce_exclusivity is True
+    assert cfg.cyclic_soc is True
+    assert cfg.include_activation_in_soc is True
+
+
+def test_load_solver_config_missing_flags_raises(tmp_path):
+    path = tmp_path / "solver.yaml"
+    path.write_text(
+        yaml.dump({"solver": {"name": "highs", "time_limit_seconds": 1, "mip_gap": 0.01}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="model_flags"):
+        load_solver_config(path)
+
+
+# ---- market_prices.yaml --------------------------------------------------
+
+def test_load_market_price_basis_config_reads_real_file():
+    cfg = load_market_price_basis_config()
+    assert isinstance(cfg, MarketPriceBasisConfig)
+    assert cfg.basis_for("fcr") == "per_block_total"
+    assert cfg.basis_for("afrr_pos") == "per_mw_hour"
+    assert cfg.basis_for("afrr_neg") == "per_mw_hour"
+    assert cfg.basis_for("day_ahead") == "per_mwh_energy"
+
+
+def test_market_price_basis_config_rejects_missing_market():
+    with pytest.raises(ValueError, match="missing required markets"):
+        MarketPriceBasisConfig(basis_by_market={"day_ahead": "per_mwh_energy"})
+
+
+def test_market_price_basis_config_rejects_invalid_basis():
+    with pytest.raises(ValueError, match="Invalid price_basis"):
+        MarketPriceBasisConfig(
+            basis_by_market={
+                "day_ahead": "per_mwh_energy",
+                "fcr": "not_a_real_basis",
+                "afrr_pos": "per_mw_hour",
+                "afrr_neg": "per_mw_hour",
+            }
+        )
+
+
+def test_market_price_basis_config_unknown_market_lookup_raises():
+    cfg = load_market_price_basis_config()
+    with pytest.raises(KeyError):
+        cfg.basis_for("not_a_market")

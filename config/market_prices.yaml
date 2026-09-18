@@ -1,0 +1,28 @@
+# Disambiguates the capacity-price UNIT BASIS per market.
+#
+# config/markets.yaml in the (read-only) bess-market-forecast repo labels
+# all three capacity markets simply "unit: EUR/MW", but tracing its own
+# ingestion code (src/ingest/regelleistung.py) shows they are NOT on the
+# same basis. Verified during bess-optimizer Milestone 0 by reading the
+# ingestion source and cross-checking value magnitudes against known
+# German market price levels:
+#
+#   - FCR source column: GERMANY_SETTLEMENTCAPACITY_PRICE_[EUR/MW]
+#     -> the TOTAL price for the whole 4-hour settlement block.
+#   - aFRR+/- source column: GERMANY_AVERAGE_CAPACITY_PRICE_[(EUR/MW)/h]
+#     -> an HOURLY rate.
+#
+# price_basis controls how src/model/build.py scales each market's price
+# in the objective (SPEC.md §4's "units warning"):
+#   per_block_total  -> use the price as-is; do NOT multiply by block_hours
+#   per_mw_hour      -> multiply by block_hours to get the block's revenue
+#   per_mwh_energy   -> multiply by dispatched MWh (Δt), not by block_hours
+#
+# day_ahead has no such ambiguity — it's a standard EUR/MWh energy price
+# used directly against MWh dispatched — and is listed here only so every
+# market this optimizer touches has an explicit, checked basis.
+
+day_ahead: per_mwh_energy
+fcr: per_block_total
+afrr_pos: per_mw_hour
+afrr_neg: per_mw_hour

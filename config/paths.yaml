@@ -1,0 +1,10 @@
+# Location of the sibling bess-market-forecast repo, which is READ-ONLY
+# (SPEC.md Hard Rule 3: never written to, modified, or committed to from
+# here). Its config/markets.yaml is the single source of truth for market
+# timing (gate closures, product durations, DST conventions) — we parse
+# that file directly rather than duplicating its values into our own YAML,
+# per SPEC.md §1's "Reuse these values; do not duplicate or re-derive them."
+#
+# Resolved relative to this repo's root (the parent of config/).
+
+forecast_repo_path: ../bess-market-forecast

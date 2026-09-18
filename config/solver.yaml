@@ -1,0 +1,18 @@
+# Solver selection, numerical tolerances, and the model-behavior toggles
+# from SPEC.md §4 that switch individual constraints on/off for
+# sensitivity checks. None of this is market data — it's run
+# configuration, so it lives here rather than in a .py file
+# (SPEC.md Hard Rule 4).
+
+solver:
+  name: highs
+  time_limit_seconds: 300
+  mip_gap: 0.0001
+
+model_flags:
+  # C1 — include the assumed aFRR activation energy in the SOC dynamics.
+  include_activation_in_soc: true
+  # C5 — forbid simultaneous charge and discharge in the same step.
+  enforce_exclusivity: true
+  # C6 — SOC at the end of the horizon must equal SOC at the start.
+  cyclic_soc: true
