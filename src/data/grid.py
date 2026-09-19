@@ -87,23 +87,35 @@ def build_capacity_blocks(day: dt.date, timing: MarketTimingConfig) -> list[Bloc
     ]
 
 
-def map_steps_to_blocks(steps: pd.DatetimeIndex, blocks: list[BlockBoundary]) -> list[int]:
+def map_steps_to_blocks(
+    steps: pd.DatetimeIndex,
+    blocks: list[BlockBoundary],
+    extend_last_block_over_long_day: bool = False,
+) -> list[int]:
     """For each 15-min step, the index of the capacity block it falls in
     (block.start <= step < block.end). Raises if a step falls outside every
-    block — e.g. a DST fall-back day where the nominal 6 blocks (anchored
-    to this day's absolute 24h) don't cover this day's full local span.
-    That's a real, currently-unhandled edge case (SPEC.md Hard Rule 6:
-    say so and stop, don't silently work around it) rather than something
-    to paper over here.
+    block, except in one explicitly-enabled case:
+
+    extend_last_block_over_long_day: on a DST fall-back day (25h) the 6
+    nominal blocks, anchored to 24 absolute hours from local midnight, end
+    an hour before the day's local end, leaving that trailing hour's steps
+    uncovered. With this flag those steps (and only steps at/after the last
+    block's end) join the LAST block, i.e. the last block's commitment is
+    held through the day's end. ASSUMPTION, unverified: no real published
+    fall-back-day data exists yet (data starts 2026-03-21; the day is
+    2026-10-25), so how regelleistung actually cuts the 25h day is not
+    confirmed. The block's own start/end (its nominal 4h, used for
+    capacity-payment sizing) are left unchanged.
     """
     block_indices = []
     for step in steps:
         match = [b.index for b in blocks if b.start <= step < b.end]
+        if not match and extend_last_block_over_long_day and blocks and step >= blocks[-1].end:
+            match = [blocks[-1].index]
         if not match:
             raise ValueError(
                 f"Step {step} does not fall within any of the {len(blocks)} capacity blocks "
-                f"(last block ends {blocks[-1].end if blocks else 'n/a'}). This is an unhandled "
-                "DST edge case (e.g. a fall-back day) — stop and resolve rather than guessing "
+                f"(last block ends {blocks[-1].end if blocks else 'n/a'}). Refusing to guess "
                 "which block it belongs to."
             )
         block_indices.append(match[0])
@@ -129,7 +141,7 @@ def build_day_grid(
     """
     steps = build_day_ahead_steps(day, day_ahead_timing)
     blocks = build_capacity_blocks(day, capacity_timing)
-    step_block_index = map_steps_to_blocks(steps, blocks)
+    step_block_index = map_steps_to_blocks(steps, blocks, extend_last_block_over_long_day=True)
     return DayGrid(
         day=day,
         steps=steps,

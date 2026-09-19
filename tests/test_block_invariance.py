@@ -3,7 +3,7 @@ step of that block -- including on DST days whose step count is not 96."""
 import pytest
 
 from dispatch_helpers import (
-    BATTERY, NORMAL_DAY, SPRING_FORWARD_DAY, grid_for, random_ancillary_case,
+    BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, grid_for, random_ancillary_case,
 )
 
 TOL = 1e-6
@@ -11,7 +11,7 @@ TOL = 1e-6
 
 @pytest.mark.parametrize(
     "day, n_steps",
-    [(NORMAL_DAY, 96), (SPRING_FORWARD_DAY, 92)],
+    [(NORMAL_DAY, 96), (SPRING_FORWARD_DAY, 92), (FALL_BACK_DAY, 100)],
 )
 def test_reserve_constant_within_block_and_grid_size_matches_dst(day, n_steps):
     case = random_ancillary_case(day, seed=4)

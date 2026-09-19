@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from dispatch_helpers import (
-    BATTERY, NORMAL_DAY, SPRING_FORWARD_DAY, block_prices, grid_for, random_ancillary_case,
+    BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, block_prices, grid_for, random_ancillary_case,
     solve_case,
 )
 
@@ -20,7 +20,7 @@ def _assert_exclusive(result) -> None:
     assert (result.p_dis <= BATTERY.power_mw * (1 - result.u) + TOL).all()
 
 
-@pytest.mark.parametrize("day", [NORMAL_DAY, SPRING_FORWARD_DAY])
+@pytest.mark.parametrize("day", [NORMAL_DAY, SPRING_FORWARD_DAY, FALL_BACK_DAY])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_exclusive_on_random_days_with_ancillary(day, seed):
     _assert_exclusive(random_ancillary_case(day, seed=seed).result)

@@ -30,6 +30,7 @@ TIMINGS = load_market_timing_configs()
 
 NORMAL_DAY = dt.date(2026, 6, 1)
 SPRING_FORWARD_DAY = dt.date(2026, 3, 29)  # 92 quarter-hours
+FALL_BACK_DAY = dt.date(2026, 10, 25)  # 100 quarter-hours
 
 
 def grid_for(day: dt.date) -> DayGrid:

@@ -19,6 +19,7 @@ FCR = TIMINGS["fcr"]
 NORMAL_DAY = dt.date(2026, 3, 4)  # confirmed present in results/, no DST nearby
 DST_SPRING_FORWARD_DAY = dt.date(2026, 3, 29)  # confirmed 92 quarter-hours in Milestone 0
 NEXT_DAY = dt.date(2026, 3, 30)
+DST_FALL_BACK_DAY = dt.date(2026, 10, 25)  # 25h day; no real data exists yet
 
 
 # ---- day-ahead 15-min steps --------------------------------------------
@@ -93,6 +94,41 @@ def test_dst_day_block_5_is_truncated_within_this_days_own_grid():
     # gets this calendar day's own steps (21:00-23:45), the rest of its
     # absolute window belongs to the next day's grid.
     assert counts.tolist() == [16, 16, 16, 16, 16, 12]
+
+
+def test_dst_fall_back_day_has_100_steps_and_trailing_hour_joins_last_block():
+    steps = build_day_ahead_steps(DST_FALL_BACK_DAY, DAY_AHEAD)
+    blocks = build_capacity_blocks(DST_FALL_BACK_DAY, FCR)
+    assert len(steps) == 100
+    # 6 nominal blocks anchored to 24 absolute hours end at 23:00 local.
+    assert blocks[-1].end == pd.Timestamp("2026-10-25 23:00", tz="Europe/Berlin")
+    with pytest.raises(ValueError, match="does not fall within any"):
+        map_steps_to_blocks(steps, blocks)
+
+    mapping = map_steps_to_blocks(steps, blocks, extend_last_block_over_long_day=True)
+    counts = pd.Series(mapping).value_counts().sort_index()
+    assert counts.tolist() == [16, 16, 16, 16, 16, 20]
+    assert mapping == sorted(mapping)  # blocks stay contiguous in time
+
+
+def test_extend_flag_does_not_swallow_steps_before_the_first_block():
+    blocks = [
+        BlockBoundary(
+            index=0,
+            start=pd.Timestamp("2026-03-04 04:00", tz="Europe/Berlin"),
+            end=pd.Timestamp("2026-03-04 08:00", tz="Europe/Berlin"),
+        )
+    ]
+    steps = pd.DatetimeIndex([pd.Timestamp("2026-03-04 03:00", tz="Europe/Berlin")])
+    with pytest.raises(ValueError, match="does not fall within any"):
+        map_steps_to_blocks(steps, blocks, extend_last_block_over_long_day=True)
+
+
+def test_build_day_grid_fall_back_day_end_to_end():
+    grid = build_day_grid(DST_FALL_BACK_DAY, DAY_AHEAD, FCR)
+    assert len(grid.steps) == 100
+    assert len(grid.step_block_index) == 100
+    assert max(grid.step_block_index) == 5
 
 
 def test_map_steps_to_blocks_raises_on_uncovered_step():

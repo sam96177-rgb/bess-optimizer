@@ -5,7 +5,7 @@ expected aFRR activation energy pushed through the same conversion losses).
 import pytest
 
 from dispatch_helpers import (
-    ASSUMPTIONS, BATTERY, NORMAL_DAY, SPRING_FORWARD_DAY, random_ancillary_case,
+    ASSUMPTIONS, BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, random_ancillary_case,
 )
 
 TOL = 1e-5
@@ -32,7 +32,7 @@ def _assert_conserved(case, initial_soc: float | None) -> None:
         prev = e.iloc[t]
 
 
-@pytest.mark.parametrize("day", [NORMAL_DAY, SPRING_FORWARD_DAY])
+@pytest.mark.parametrize("day", [NORMAL_DAY, SPRING_FORWARD_DAY, FALL_BACK_DAY])
 def test_energy_conserved_every_step_cyclic(day):
     case = random_ancillary_case(day, seed=1)
     # Non-trivial: aFRR is actually sold, so the activation term is exercised.
