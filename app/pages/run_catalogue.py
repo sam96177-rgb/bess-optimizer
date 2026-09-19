@@ -26,13 +26,18 @@ if catalogue.empty:
     )
     st.stop()
 
-st.caption(f"{len(catalogue)} run(s) on disk.")
+st.caption(
+    f"{len(catalogue)} run(s) on disk. Revenue columns: net = gross - degradation (older runs only have "
+    "`total_revenue_eur`, which is the same net figure). `da_proxy_model` is set only for the strict "
+    "full_sequential variant."
+)
 
 display_cols = [
     c for c in [
         "solve_id", "strategy", "decision_source", "forecast_model", "forecast_quantile",
-        "start_date", "end_date", "n_days_solved", "n_days_skipped", "total_revenue_eur",
-        "git_commit", "created_at",
+        "da_proxy_model", "start_date", "end_date", "n_days_solved", "n_days_skipped",
+        "gross_revenue_eur", "degradation_cost_eur", "net_revenue_eur", "equivalent_full_cycles",
+        "total_revenue_eur", "git_commit", "created_at",
     ]
     if c in catalogue.columns
 ]

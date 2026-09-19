@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
+from analysis import revenue_split
 from data_loader import (
     load_daily_revenue,
     load_forecast_prices,
@@ -190,14 +191,21 @@ if not pf_window.empty:
 ax.set_ylabel("EUR / day")
 ax_cum.set_ylabel("EUR cumulative")
 ax.legend(bar_lines, [h.get_label() for h in bar_lines], loc="upper left", fontsize=8)
-ax.set_title("Revenue")
+ax.set_title("Net revenue (gross minus degradation)")
 ax.set_xlabel("Delivery time")
 
 fig.autofmt_xdate()
 fig.tight_layout()
 st.pyplot(fig)
 
+def _split_text(frame: pd.DataFrame) -> str:
+    if "gross" not in frame.columns:  # run predates the gross/degradation columns
+        return f"EUR {frame['total'].sum():,.2f} net"
+    s = revenue_split(frame)
+    return f"gross EUR {s['gross']:,.2f} - degradation EUR {s['degradation']:,.2f} = net EUR {s['net']:,.2f}"
+
+
 st.caption(
-    f"{len(dr_window)} day(s) shown | forecast-driven total: EUR {dr_window['total'].sum():,.2f}"
-    + (f" | perfect-foresight total: EUR {pf_window['total'].sum():,.2f}" if not pf_window.empty else "")
+    f"{len(dr_window)} day(s) shown | forecast-driven: {_split_text(dr_window)}"
+    + (f" | perfect foresight: {_split_text(pf_window)}" if not pf_window.empty else "")
 )

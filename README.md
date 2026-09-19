@@ -381,18 +381,33 @@ streamlit run app/streamlit_app.py
 Reads only `results/<solve_id>/` sidecars (via `src/results_catalogue.py`)
 and the sibling repo's `results/*.parquet` (read-only) — never solves
 anything itself, so solve first (`--write-results` or `python -m
-src.batch`). Three pages:
+src.batch`). Six pages:
 
 - **Dispatch Explorer** — pick a model, quantile, strategy, and date
   window: the day-ahead forecast fan vs. realized price, battery
   dispatch/SOC, ancillary capacity commitments per 4h block, and daily +
-  cumulative revenue against the matching perfect-foresight run.
+  cumulative net revenue against the matching perfect-foresight run, with
+  the gross - degradation = net split for both.
 - **Forecast Error Cost** — a models x strategies matrix of the cost of
   forecast error defined above, with day sets intersected before
   differencing (see [Risks](#not-built-yet) below) and the dropped-day
   count shown alongside so a large gap isn't hidden.
-- **Run Catalogue** — every solved run and, for a selected one, its skip
-  log.
+- **Oracle Capture** — per revenue market (day-ahead, FCR, aFRR+, aFRR-,
+  assumed activation, gross, net), the share of perfect-foresight revenue
+  each model captured. Reported per market because capacity payments (and
+  the assumed activation term) dominate, so the net figure looks high for
+  every model while the day-ahead leg is where forecast quality shows.
+- **Sequential vs Simultaneous** — net revenue of perfect foresight,
+  simultaneous (`full_cooptimized`) and gate-ordered (`full_sequential`)
+  clearing over the same days, per model, plus the reserve commitments
+  each made for a chosen day. A sidebar picker selects the reserve-stage
+  day-ahead view (same model, or the strict `seasonal_naive` variant).
+- **Digital Twin** — a run replayed by `python -m src.twin`: headline
+  violation and shortfall figures, a per-day table, planned vs twin SOC
+  for a chosen day, and the shortfall distribution. Flagged as
+  assumption-driven on the page. Read-only: run the twin CLI first.
+- **Run Catalogue** — every solved run (with gross/degradation/net and
+  equivalent full cycles) and, for a selected one, its skip log.
 
 ---
 

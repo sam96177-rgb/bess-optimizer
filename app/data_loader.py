@@ -6,6 +6,7 @@ SPEC.md Hard Rule 3) -- nothing here builds or solves a model.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -163,3 +164,43 @@ def matching_runs(
     else:
         mask &= catalogue["forecast_quantile"] == forecast_quantile
     return catalogue[mask].sort_values("created_at", ascending=False)
+
+
+def filter_proxy(runs: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Keep the runs whose reserve-stage day-ahead view matches `label` (see
+    analysis.proxy_label). Runs written before the column existed count as
+    'same model at every stage'."""
+    from analysis import proxy_label
+
+    if runs.empty:
+        return runs
+    proxies = runs["da_proxy_model"] if "da_proxy_model" in runs.columns else pd.Series(None, index=runs.index, dtype=object)
+    return runs[proxies.map(proxy_label) == label]
+
+
+def twin_mtime(solve_id: str) -> float | None:
+    """Modification time of a run's twin_meta.json (written last), or None if the
+    run has no twin output. Passed to the cached loaders so re-running the twin
+    invalidates them."""
+    path = RESULTS_DIR / solve_id / "twin_meta.json"
+    return path.stat().st_mtime if path.exists() else None
+
+
+@st.cache_data
+def load_twin_summary(solve_id: str, mtime: float) -> pd.DataFrame:
+    df = pd.read_parquet(RESULTS_DIR / solve_id / "twin_summary.parquet")
+    df["solve_date"] = pd.to_datetime(df["solve_date"]).dt.date
+    return df
+
+
+@st.cache_data
+def load_twin_paths(solve_id: str, mtime: float) -> pd.DataFrame:
+    df = pd.read_parquet(RESULTS_DIR / solve_id / "twin_paths.parquet")
+    df["target_time"] = pd.to_datetime(df["target_time"])
+    df["solve_date"] = pd.to_datetime(df["solve_date"]).dt.date
+    return df
+
+
+@st.cache_data
+def load_twin_meta(solve_id: str, mtime: float) -> dict:
+    return json.loads((RESULTS_DIR / solve_id / "twin_meta.json").read_text(encoding="utf-8"))
