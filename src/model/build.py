@@ -145,8 +145,12 @@ def build_model(
     if ancillary is not None and ancillary.include_activation_in_soc:
         alpha_pos = ancillary.assumptions.alpha_pos
         alpha_neg = ancillary.assumptions.alpha_neg
+        # Activated aFRR energy passes through the conversion losses:
+        # up-activation drains 1/eta per MWh delivered, down-activation
+        # stores eta per MWh absorbed.
         activation_by_step = [
-            (alpha_pos * c_pos.sel(block=bi) - alpha_neg * c_neg.sel(block=bi)) * delta_t_hours
+            (alpha_pos / battery.eta * c_pos.sel(block=bi) - alpha_neg * battery.eta * c_neg.sel(block=bi))
+            * delta_t_hours
             for bi in ancillary.step_block_index
         ]
     else:
@@ -162,13 +166,21 @@ def build_model(
             - prev_e
             - battery.eta * delta_t_hours * p_ch.sel(step=steps[t])
             + (delta_t_hours / battery.eta) * p_dis.sel(step=steps[t])
+            + battery.aux_load_mw * delta_t_hours
             + activation_t
         )
         m.add_constraints(expr == 0, name=f"soc_dynamics_t{t}")
 
     # ---- Objective ----
     day_ahead_term = (day_ahead_prices.reindex(steps) * (p_dis - p_ch) * delta_t_hours).sum()
-    objective = day_ahead_term
+    degradation_term = battery.degradation_cost_eur_mwh * (p_ch + p_dis).sum() * delta_t_hours
+    objective = day_ahead_term - degradation_term
+
+    # Terminal credit: only meaningful when the day does not close its own
+    # SOC loop. A credit (not a hard floor) so DST/extreme days stay feasible.
+    terminal_lambda = terminal_value_eur_mwh(battery, day_ahead_prices, cyclic_soc)
+    if terminal_lambda != 0.0:
+        objective = objective + terminal_lambda * e.sel(step=steps[-1])
 
     if ancillary is not None:
         objective = objective + _capacity_revenue_term(
@@ -190,6 +202,17 @@ def build_model(
 
     m.add_objective(objective, sense="max")
     return m
+
+
+def terminal_value_eur_mwh(battery: Battery, decision_day_ahead_prices: pd.Series, cyclic_soc: bool) -> float:
+    """EUR/MWh credit the optimizer assigns to energy left in the battery
+    at the end of a non-cyclic day. Zero under cyclic SOC (the day already
+    ends where it started) or when terminal_value is 'none'."""
+    if cyclic_soc or battery.terminal_value == "none":
+        return 0.0
+    if battery.terminal_value == "mean_decision_da_price":
+        return float(decision_day_ahead_prices.mean())
+    raise ValueError(f"Unsupported terminal_value '{battery.terminal_value}'")
 
 
 def nominal_block_hours(block: BlockBoundary) -> float:

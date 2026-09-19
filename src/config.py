@@ -33,17 +33,39 @@ def _load_yaml(path: Path) -> dict:
     return data
 
 
+_VALID_TERMINAL_VALUES = {"mean_decision_da_price", "none"}
+
+
 @dataclass(frozen=True)
 class BatteryConfig:
-    power_mw: float
+    power_nominal_mw: float
+    power_derating_factor: float
     energy_mwh: float
     round_trip_efficiency: float
     soc_min_fraction: float
     soc_max_fraction: float
+    aux_load_mw: float
+    degradation_cost_eur_mwh: float
+    terminal_value: str
+
+    @property
+    def power_mw(self) -> float:
+        """Operational power limit: nominal rating after derating."""
+        return self.power_nominal_mw * self.power_derating_factor
 
     def __post_init__(self) -> None:
-        if self.power_mw <= 0:
-            raise ValueError(f"power_mw must be > 0, got {self.power_mw}")
+        if self.power_nominal_mw <= 0:
+            raise ValueError(f"power_nominal_mw must be > 0, got {self.power_nominal_mw}")
+        if not (0 < self.power_derating_factor <= 1):
+            raise ValueError(f"power_derating_factor must be in (0, 1], got {self.power_derating_factor}")
+        if self.aux_load_mw < 0:
+            raise ValueError(f"aux_load_mw must be >= 0, got {self.aux_load_mw}")
+        if self.degradation_cost_eur_mwh < 0:
+            raise ValueError(f"degradation_cost_eur_mwh must be >= 0, got {self.degradation_cost_eur_mwh}")
+        if self.terminal_value not in _VALID_TERMINAL_VALUES:
+            raise ValueError(
+                f"terminal_value must be one of {sorted(_VALID_TERMINAL_VALUES)}, got '{self.terminal_value}'"
+            )
         if self.energy_mwh <= 0:
             raise ValueError(f"energy_mwh must be > 0, got {self.energy_mwh}")
         if not (0 < self.round_trip_efficiency <= 1):
@@ -60,16 +82,23 @@ class BatteryConfig:
 def load_battery_config(path: Path | None = None) -> BatteryConfig:
     path = path or (CONFIG_DIR / "battery.yaml")
     data = _load_yaml(path)
-    required = {"power_mw", "energy_mwh", "round_trip_efficiency", "soc_min_fraction", "soc_max_fraction"}
+    required = {
+        "power_nominal_mw", "power_derating_factor", "energy_mwh", "round_trip_efficiency",
+        "soc_min_fraction", "soc_max_fraction", "aux_load_mw", "degradation_cost_eur_mwh", "terminal_value",
+    }
     missing = required - data.keys()
     if missing:
         raise ValueError(f"{path} missing required keys: {sorted(missing)}")
     return BatteryConfig(
-        power_mw=float(data["power_mw"]),
+        power_nominal_mw=float(data["power_nominal_mw"]),
+        power_derating_factor=float(data["power_derating_factor"]),
         energy_mwh=float(data["energy_mwh"]),
         round_trip_efficiency=float(data["round_trip_efficiency"]),
         soc_min_fraction=float(data["soc_min_fraction"]),
         soc_max_fraction=float(data["soc_max_fraction"]),
+        aux_load_mw=float(data["aux_load_mw"]),
+        degradation_cost_eur_mwh=float(data["degradation_cost_eur_mwh"]),
+        terminal_value=str(data["terminal_value"]),
     )
 
 

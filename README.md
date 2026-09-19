@@ -1,7 +1,7 @@
 # bess-optimizer
 
-A deterministic MILP optimizer that decides how to operate a 1 MW / 2 MWh
-battery energy storage system (BESS) across four German markets —
+A deterministic MILP optimizer that decides how to operate a 10 MWh / 5 MW
+(4.5 MW after derating) battery energy storage system (BESS) across four German markets —
 day-ahead energy, FCR, aFRR+, aFRR- — **jointly**. It answers two
 questions: given perfect foresight of what prices actually did, how much
 revenue could this battery have earned and where does it come from
@@ -143,9 +143,16 @@ this isn't what was intended, it's a one-line change in `build_model`.
 
 ## Configuration
 
-- **`config/battery.yaml`** — the locked v1 test system (1 MW / 2 MWh,
-  88% round-trip efficiency, 5–95% SOC band). These are given values, not
-  assumptions.
+- **`config/battery.yaml`** — the v2 test system: 10 MWh, 5 MW nominal x 0.9
+  derating = 4.5 MW operational, 90% round-trip efficiency, 10–90% SOC band
+  (1–9 MWh), 50 kW aux load drawn from the battery every step, and EUR
+  8/MWh degradation cost on throughput (charge + discharge). Given values,
+  not assumptions. `terminal_value: mean_decision_da_price` adds a
+  decision-side credit for energy left at the end of a non-cyclic day
+  (lambda = the day's mean decision DA price; skipped under cyclic SOC).
+  The credit is never reported as revenue: `net = gross - degradation`,
+  and `net + terminal_credit == solver objective` when settlement equals
+  decision prices. `daily_revenue.parquet`'s `total` column is net revenue.
 - **`config/solver.yaml`** — solver choice/tolerances, and the three
   model-behavior toggles: `cyclic_soc`, `enforce_exclusivity`,
   `include_activation_in_soc`.
@@ -172,7 +179,7 @@ these are measurements.**
 
 | Assumption | Current value | Why it's assumed | Real replacement |
 |---|---|---|---|
-| `alpha_pos`, `alpha_neg` (aFRR activation rate) | 0.10, 0.10 — **unconfirmed placeholder**, SPEC.md gave no default | Real activation is stochastic and unknown ahead of time; the deterministic MILP needs a point estimate | Activation volumes published on Netztransparenz.de, aggregated to an empirical rate per block/season |
+| `alpha_pos`, `alpha_neg` (aFRR activation rate) | 0.05, 0.05 — **unconfirmed placeholder**, SPEC.md gave no default | Real activation is stochastic and unknown ahead of time; the deterministic MILP needs a point estimate | Activation volumes published on Netztransparenz.de, aggregated to an empirical rate per block/season |
 | `activation_energy_price_eur_mwh` | 100.0 — **unconfirmed placeholder** | This repo has no activation-price feed; regelleistung.net is capacity-only | aFRR energy activation prices from the ENTSO-E Transparency Platform (not regelleistung.net) |
 | `fcr_hours` (FCR reserve duration) | 0.5 | Prequalification energy-headroom rule, given as a SPEC.md default but **not verified against current German regulation** | BNetzA / regelleistung.net prequalification documentation |
 | `afrr_hours` (aFRR reserve duration) | 1.0 | Same as above | Same as above |

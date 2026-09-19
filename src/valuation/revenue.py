@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from src.model.battery import Battery
 from src.model.build import AncillaryInputs, nominal_block_hours
 from src.model.solve import SolveResult
 
@@ -19,10 +20,22 @@ class RevenueBreakdown:
     afrr_pos: float
     afrr_neg: float
     activation: float
+    degradation: float = 0.0  # a cost, stored as a positive number
+    terminal_credit: float = 0.0  # decision-side value of leftover energy; NOT revenue
 
     @property
-    def total(self) -> float:
+    def gross(self) -> float:
         return self.day_ahead + self.fcr + self.afrr_pos + self.afrr_neg + self.activation
+
+    @property
+    def net(self) -> float:
+        return self.gross - self.degradation
+
+    @property
+    def objective_equivalent(self) -> float:
+        """What the solver's objective should equal when settlement prices
+        equal decision prices."""
+        return self.net + self.terminal_credit
 
 
 def compute_revenue(
@@ -30,12 +43,23 @@ def compute_revenue(
     day_ahead_prices: pd.Series,
     delta_t_hours: float,
     ancillary: AncillaryInputs | None = None,
+    *,
+    battery: Battery,
+    terminal_value_eur_mwh: float = 0.0,
 ) -> RevenueBreakdown:
+    """`terminal_value_eur_mwh` is the decision-side lambda from
+    build.terminal_value_eur_mwh; the resulting credit is reported
+    separately and never counted in gross/net."""
     prices = day_ahead_prices.reindex(result.p_dis.index)
     day_ahead = float((prices * (result.p_dis - result.p_ch) * delta_t_hours).sum())
+    degradation = float(battery.degradation_cost_eur_mwh * (result.p_ch + result.p_dis).sum() * delta_t_hours)
+    terminal_credit = float(terminal_value_eur_mwh * result.e.iloc[-1])
 
     if ancillary is None:
-        return RevenueBreakdown(day_ahead=day_ahead, fcr=0.0, afrr_pos=0.0, afrr_neg=0.0, activation=0.0)
+        return RevenueBreakdown(
+            day_ahead=day_ahead, fcr=0.0, afrr_pos=0.0, afrr_neg=0.0, activation=0.0,
+            degradation=degradation, terminal_credit=terminal_credit,
+        )
 
     fcr = _capacity_revenue(result.c_fcr, ancillary.fcr_prices, "fcr", ancillary.price_basis, ancillary.blocks)
     afrr_pos = _capacity_revenue(
@@ -52,7 +76,10 @@ def compute_revenue(
             + ancillary.assumptions.alpha_neg * result.c_neg.loc[block.index]
         ) * nominal_block_hours(block) * ancillary.assumptions.activation_energy_price_eur_mwh
 
-    return RevenueBreakdown(day_ahead=day_ahead, fcr=fcr, afrr_pos=afrr_pos, afrr_neg=afrr_neg, activation=activation)
+    return RevenueBreakdown(
+        day_ahead=day_ahead, fcr=fcr, afrr_pos=afrr_pos, afrr_neg=afrr_neg, activation=activation,
+        degradation=degradation, terminal_credit=terminal_credit,
+    )
 
 
 def _capacity_revenue(

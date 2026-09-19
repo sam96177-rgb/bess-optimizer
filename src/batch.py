@@ -95,11 +95,16 @@ def _fingerprint(battery: Battery, solver: SolverConfig, assumptions: Assumption
     result under new assumptions.
     """
     return {
+        "battery.power_nominal_mw": battery.power_nominal_mw,
+        "battery.power_derating_factor": battery.power_derating_factor,
         "battery.power_mw": battery.power_mw,
         "battery.energy_mwh": battery.energy_mwh,
         "battery.round_trip_efficiency": battery.round_trip_efficiency,
         "battery.soc_min_fraction": battery.soc_min_fraction,
         "battery.soc_max_fraction": battery.soc_max_fraction,
+        "battery.aux_load_mw": battery.aux_load_mw,
+        "battery.degradation_cost_eur_mwh": battery.degradation_cost_eur_mwh,
+        "battery.terminal_value": battery.terminal_value,
         "solver.name": solver.name,
         "solver.mip_gap": solver.mip_gap,
         "solver.time_limit_seconds": solver.time_limit_seconds,
@@ -217,7 +222,7 @@ def run_batch(
             )
             catalogue = scan_runs(results_dir)
             total = float(result.daily_revenue["total"].sum()) if not result.daily_revenue.empty else 0.0
-            print(f"[done]  {label} -> solve_id={result.solve_id} total_revenue_eur={total:.2f}")
+            print(f"[done]  {label} -> solve_id={result.solve_id} net_revenue_eur={total:.2f}")
             solved += 1
         except Exception:
             print(f"[FAILED] {label}")

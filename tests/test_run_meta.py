@@ -63,11 +63,16 @@ def test_run_meta_carries_every_field_for_a_forecast_driven_run(tmp_path):
     assert meta["n_days_skipped"] == len(result.skip_log)
 
     assert meta["battery"] == {
+        "power_nominal_mw": BATTERY.power_nominal_mw,
+        "power_derating_factor": BATTERY.power_derating_factor,
         "power_mw": BATTERY.power_mw,
         "energy_mwh": BATTERY.energy_mwh,
         "round_trip_efficiency": BATTERY.round_trip_efficiency,
         "soc_min_fraction": BATTERY.soc_min_fraction,
         "soc_max_fraction": BATTERY.soc_max_fraction,
+        "aux_load_mw": BATTERY.aux_load_mw,
+        "degradation_cost_eur_mwh": BATTERY.degradation_cost_eur_mwh,
+        "terminal_value": BATTERY.terminal_value,
     }
     assert meta["solver"] == {
         "name": SOLVER.name, "mip_gap": SOLVER.mip_gap, "time_limit_seconds": SOLVER.time_limit_seconds,
@@ -83,7 +88,14 @@ def test_run_meta_carries_every_field_for_a_forecast_driven_run(tmp_path):
         "afrr_reserve_hours": ASSUMPTIONS.afrr_reserve_hours,
     }
     assert meta["price_basis"] == dict(PRICE_BASIS.basis_by_market)
-    assert meta["total_revenue_eur"] == pytest.approx(float(result.daily_revenue["total"].sum()))
+    dr = result.daily_revenue
+    assert meta["gross_revenue_eur"] == pytest.approx(float(dr["gross"].sum()))
+    assert meta["degradation_cost_eur"] == pytest.approx(float(dr["degradation"].sum()))
+    assert meta["net_revenue_eur"] == pytest.approx(meta["gross_revenue_eur"] - meta["degradation_cost_eur"])
+    assert meta["total_revenue_eur"] == pytest.approx(meta["net_revenue_eur"])
+    usable = BATTERY.soc_max_mwh - BATTERY.soc_min_mwh
+    assert meta["equivalent_full_cycles"] == pytest.approx(float(dr["discharged_mwh"].sum()) / usable)
+    assert meta["degradation_cost_eur"] > 0
     assert meta["forecast_repo_path"] == str(PATHS.forecast_repo_path)
 
     # One (market, model) pair per parquet file in the sibling repo (Verified facts).

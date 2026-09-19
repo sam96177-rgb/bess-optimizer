@@ -142,6 +142,10 @@ def simulate_naive_day(day_prices: DayPrices, battery: Battery, starting_soc_mwh
 
     soc = starting_soc_mwh
     for step, block_idx in zip(steps, day_prices.grid.step_block_index):
+        # Parasitic load drains the battery every step. Clamped at soc_min:
+        # the heuristic has no lookahead to refill, so at the floor the aux
+        # load is treated as grid-supplied rather than breaching the window.
+        soc = max(battery.soc_min_mwh, soc - battery.aux_load_mw * dt_h)
         if block_idx == cheapest_block:
             headroom_mwh = max(0.0, battery.soc_max_mwh - soc)
             max_charge_energy_mwh = battery.power_mw * dt_h * battery.eta
@@ -158,7 +162,10 @@ def simulate_naive_day(day_prices: DayPrices, battery: Battery, starting_soc_mwh
             p_dis.loc[step] = discharge_power_mw
         e.loc[step] = soc
 
-    objective_value = float((day_prices.day_ahead * (p_dis - p_ch) * dt_h).sum())
+    objective_value = float(
+        (day_prices.day_ahead * (p_dis - p_ch) * dt_h).sum()
+        - battery.degradation_cost_eur_mwh * (p_ch + p_dis).sum() * dt_h
+    )
     return SolveResult(
         objective_value=objective_value, p_ch=p_ch, p_dis=p_dis, u=u, e=e, c_fcr=None, c_pos=None, c_neg=None,
     )
@@ -204,9 +211,11 @@ def run_naive_benchmark(
         result = simulate_naive_day(pair.decision, battery, starting_soc)
         soc = float(result.e.iloc[-1])
 
-        revenue = compute_revenue(result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, ancillary=None)
+        revenue = compute_revenue(
+            result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, ancillary=None, battery=battery,
+        )
         long_rows.extend(day_to_long_rows(solve_id, pair.decision, result, e_is_assumption=False))
-        daily_revenue_rows.append(revenue_to_row(pair.day, revenue))
+        daily_revenue_rows.append(revenue_to_row(pair.day, revenue, result, pair.settlement.grid.delta_t_hours))
 
     long_format = pd.DataFrame(long_rows, columns=LONG_FORMAT_COLUMNS)
     daily_revenue = pd.DataFrame(daily_revenue_rows)

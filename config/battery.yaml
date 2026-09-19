@@ -1,9 +1,18 @@
-# Physical battery parameters. These are the SPEC.md §3 "locked decisions"
-# for the v1 test system, not assumptions — they describe a specific
-# battery, not a guess standing in for missing data.
+# Physical battery parameters (v2 test system: 10 MWh / 5 MW nominal).
+# These describe a specific battery, not a guess standing in for missing
+# data. Operational power limit = power_nominal_mw * power_derating_factor.
 
-power_mw: 1.0
-energy_mwh: 2.0
-round_trip_efficiency: 0.88
-soc_min_fraction: 0.05
-soc_max_fraction: 0.95
+power_nominal_mw: 5.0
+power_derating_factor: 0.9   # operational limit = 4.5 MW
+energy_mwh: 10.0
+round_trip_efficiency: 0.90
+soc_min_fraction: 0.10
+soc_max_fraction: 0.90
+aux_load_mw: 0.05            # constant parasitic load, drawn from the battery every step
+degradation_cost_eur_mwh: 8.0  # EUR per MWh of throughput (charge + discharge)
+
+# How leftover energy at the end of a non-cyclic day is valued in the
+# optimizer's objective (a decision-side credit, never reported as revenue).
+#   mean_decision_da_price : lambda = mean DA price the solver decided on
+#   none                   : no terminal credit
+terminal_value: mean_decision_da_price

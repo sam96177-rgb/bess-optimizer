@@ -18,33 +18,64 @@ from src.config import (
 def test_load_battery_config_reads_real_file():
     cfg = load_battery_config()
     assert isinstance(cfg, BatteryConfig)
-    assert cfg.power_mw == 1.0
-    assert cfg.energy_mwh == 2.0
-    assert cfg.round_trip_efficiency == 0.88
-    assert cfg.soc_min_fraction == 0.05
-    assert cfg.soc_max_fraction == 0.95
+    assert cfg.power_nominal_mw == 5.0
+    assert cfg.power_derating_factor == 0.9
+    assert cfg.power_mw == pytest.approx(4.5)
+    assert cfg.energy_mwh == 10.0
+    assert cfg.round_trip_efficiency == 0.90
+    assert cfg.soc_min_fraction == 0.10
+    assert cfg.soc_max_fraction == 0.90
+    assert cfg.aux_load_mw == 0.05
+    assert cfg.degradation_cost_eur_mwh == 8.0
+    assert cfg.terminal_value == "mean_decision_da_price"
+
+
+def _battery_kwargs(**overrides):
+    kwargs = dict(
+        power_nominal_mw=5.0, power_derating_factor=0.9, energy_mwh=10.0, round_trip_efficiency=0.90,
+        soc_min_fraction=0.10, soc_max_fraction=0.90, aux_load_mw=0.05, degradation_cost_eur_mwh=8.0,
+        terminal_value="mean_decision_da_price",
+    )
+    kwargs.update(overrides)
+    return kwargs
 
 
 def test_battery_config_rejects_invalid_soc_bounds():
     with pytest.raises(ValueError, match="soc_min_fraction"):
-        BatteryConfig(
-            power_mw=1.0,
-            energy_mwh=2.0,
-            round_trip_efficiency=0.88,
-            soc_min_fraction=0.95,
-            soc_max_fraction=0.05,
-        )
+        BatteryConfig(**_battery_kwargs(soc_min_fraction=0.95, soc_max_fraction=0.05))
 
 
 def test_battery_config_rejects_nonpositive_power():
-    with pytest.raises(ValueError, match="power_mw"):
-        BatteryConfig(
-            power_mw=0.0,
-            energy_mwh=2.0,
-            round_trip_efficiency=0.88,
-            soc_min_fraction=0.05,
-            soc_max_fraction=0.95,
-        )
+    with pytest.raises(ValueError, match="power_nominal_mw"):
+        BatteryConfig(**_battery_kwargs(power_nominal_mw=0.0))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"power_derating_factor": 0.0}, "power_derating_factor"),
+        ({"power_derating_factor": 1.1}, "power_derating_factor"),
+        ({"aux_load_mw": -0.01}, "aux_load_mw"),
+        ({"degradation_cost_eur_mwh": -1.0}, "degradation_cost_eur_mwh"),
+        ({"terminal_value": "bogus"}, "terminal_value"),
+    ],
+)
+def test_battery_config_rejects_invalid_v2_fields(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        BatteryConfig(**_battery_kwargs(**overrides))
+
+
+def test_load_battery_config_rejects_old_v1_file(tmp_path):
+    path = tmp_path / "battery.yaml"
+    path.write_text(
+        yaml.dump({
+            "power_mw": 1.0, "energy_mwh": 2.0, "round_trip_efficiency": 0.88,
+            "soc_min_fraction": 0.05, "soc_max_fraction": 0.95,
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing required keys"):
+        load_battery_config(path)
 
 
 def test_load_battery_config_missing_file_raises(tmp_path):

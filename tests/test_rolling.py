@@ -1,3 +1,4 @@
+import dataclasses
 import datetime as dt
 
 import pandas as pd
@@ -100,9 +101,12 @@ def test_daily_revenue_has_one_row_per_solved_day_and_matches_manual_solve():
         delta_t_hours=day_prices.grid.delta_t_hours, ancillary=ancillary,
     )
     manual_result = solve_model(model, SOLVER)
-    manual_revenue = compute_revenue(manual_result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary)
+    manual_revenue = compute_revenue(
+        manual_result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary, battery=BATTERY,
+    )
 
-    assert row["total"] == pytest.approx(manual_revenue.total, rel=1e-6)
+    assert row["total"] == pytest.approx(manual_revenue.net, rel=1e-6)
+    assert row["net"] == pytest.approx(row["gross"] - row["degradation"])
     assert row["activation_is_assumption"] == True  # noqa: E712
 
 
@@ -140,13 +144,15 @@ def test_cyclic_soc_false_carries_e_across_day_boundary():
     first_block_c_pos = day2_rows[(day2_rows["variable"] == "c_pos") & (day2_rows["block_id"] == 0)]["value"].iloc[0]
     first_block_c_neg = day2_rows[(day2_rows["variable"] == "c_neg") & (day2_rows["block_id"] == 0)]["value"].iloc[0]
     activation_0 = (
-        ASSUMPTIONS.alpha_pos * first_block_c_pos - ASSUMPTIONS.alpha_neg * first_block_c_neg
+        ASSUMPTIONS.alpha_pos / BATTERY.eta * first_block_c_pos
+        - ASSUMPTIONS.alpha_neg * BATTERY.eta * first_block_c_neg
     ) * 0.25
 
     expected_e0 = (
         day1_last_e
         + BATTERY.eta * 0.25 * day2_p_ch.iloc[0]
         - (0.25 / BATTERY.eta) * day2_p_dis.iloc[0]
+        - BATTERY.aux_load_mw * 0.25
         - activation_0
     )
     assert day2_e.iloc[0] == pytest.approx(expected_e0, abs=1e-4)
@@ -221,15 +227,17 @@ def test_forecast_driven_wrong_step_settles_worse_than_perfect_foresight(tmp_pat
     day = dt.date(2026, 6, 1)
     model, quantile = "wrong_step_model", 0.5
     fake_paths = _write_wrong_step_fake_repo(tmp_path, day, model, quantile)
+    # The closed-form values below assume no aux drain and free cycling.
+    battery = dataclasses.replace(BATTERY, aux_load_mw=0.0, degradation_cost_eur_mwh=0.0)
 
     forecast_result = run_rolling(
-        start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER,
+        start_date=day, end_date=day, battery=battery, solver_config=SOLVER,
         day_ahead_timing=_SYNTH_DAY_AHEAD_TIMING, capacity_timing=_SYNTH_FCR_TIMING,
         include_ancillary=False, paths_config=fake_paths,
         decision_source="forecast", forecast_model=model, forecast_quantile=quantile,
     )
     perfect_result = run_rolling(
-        start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER,
+        start_date=day, end_date=day, battery=battery, solver_config=SOLVER,
         day_ahead_timing=_SYNTH_DAY_AHEAD_TIMING, capacity_timing=_SYNTH_FCR_TIMING,
         include_ancillary=False, paths_config=fake_paths,
     )

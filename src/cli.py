@@ -42,18 +42,31 @@ def format_assumptions_banner() -> str:
     return f"{border}\nASSUMPTIONS IN EFFECT FOR THIS RUN (config/assumptions.yaml)\n{border}\n{raw_text}{border}\n"
 
 
+def format_battery_banner(battery: Battery) -> str:
+    border = "=" * 78
+    lines = [
+        border,
+        "BATTERY IN EFFECT FOR THIS RUN (config/battery.yaml)",
+        border,
+        f"  nominal power: {battery.power_nominal_mw:g} MW x derating {battery.power_derating_factor:g}"
+        f" = {battery.power_mw:g} MW operational",
+        f"  energy: {battery.energy_mwh:g} MWh  |  SOC window: {battery.soc_min_mwh:g}-{battery.soc_max_mwh:g} MWh"
+        f" ({battery.soc_min_fraction:.0%}-{battery.soc_max_fraction:.0%})",
+        f"  round-trip efficiency: {battery.round_trip_efficiency:g}  |  aux load: {battery.aux_load_mw * 1000:g} kW",
+        f"  degradation cost: EUR {battery.degradation_cost_eur_mwh:g}/MWh throughput"
+        f"  |  terminal value: {battery.terminal_value}",
+        border,
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def summarize_revenue(result: RollingRunResult) -> dict[str, float]:
+    """`total` is net revenue (gross - degradation)."""
     dr = result.daily_revenue
+    keys = ("day_ahead", "fcr", "afrr_pos", "afrr_neg", "activation", "gross", "degradation", "net", "total")
     if dr.empty:
-        return {k: 0.0 for k in ("day_ahead", "fcr", "afrr_pos", "afrr_neg", "activation", "total")}
-    return {
-        "day_ahead": float(dr["day_ahead"].sum()),
-        "fcr": float(dr["fcr"].sum()),
-        "afrr_pos": float(dr["afrr_pos"].sum()),
-        "afrr_neg": float(dr["afrr_neg"].sum()),
-        "activation": float(dr["activation"].sum()),
-        "total": float(dr["total"].sum()),
-    }
+        return {k: 0.0 for k in keys}
+    return {k: float(dr[k].sum()) for k in keys}
 
 
 def compute_operational_stats(result: RollingRunResult, battery: Battery, delta_t_hours: float) -> dict[str, float]:
@@ -90,7 +103,10 @@ def print_summary(name: str, result: RollingRunResult, battery: Battery, delta_t
 
     print(f"--- {name} ---")
     print(f"  days solved: {len(result.daily_revenue)}  |  days skipped: {len(result.skip_log)}")
-    print(f"  total revenue: EUR {revenue['total']:.2f}")
+    print(
+        f"  gross revenue: EUR {revenue['gross']:.2f}  |  degradation: EUR {revenue['degradation']:.2f}  |  "
+        f"net revenue: EUR {revenue['net']:.2f}"
+    )
     print(
         "    split -> day_ahead: {day_ahead:.2f}  fcr: {fcr:.2f}  afrr_pos: {afrr_pos:.2f}  "
         "afrr_neg: {afrr_neg:.2f}  activation: {activation:.2f}".format(**revenue)
@@ -99,11 +115,11 @@ def print_summary(name: str, result: RollingRunResult, battery: Battery, delta_t
         f"  cycles/day: {stats['cycles_per_day']:.2f}  "
         f"avg SOC utilisation: {stats['avg_soc_utilization'] * 100:.1f}%"
     )
-    if revenue["total"] != 0:
-        activation_fraction = revenue["activation"] / revenue["total"]
+    if revenue["gross"] != 0:
+        activation_fraction = revenue["activation"] / revenue["gross"]
         if abs(activation_fraction) > ACTIVATION_FRACTION_WARNING_THRESHOLD:
             print(
-                f"  !! {activation_fraction * 100:.1f}% of total revenue comes from the ASSUMED "
+                f"  !! {activation_fraction * 100:.1f}% of gross revenue comes from the ASSUMED "
                 "activation term -- this headline number is largely an assumption, not a measurement."
             )
     print()
@@ -145,6 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     timings = load_market_timing_configs(paths)
 
     print(format_assumptions_banner())
+    print(format_battery_banner(battery))
     print(f"Run window: {args.start_date} to {args.end_date}")
     print(f"Decision source: {args.decision_source}"
           + (f" (model={args.forecast_model}, quantile={args.forecast_quantile})" if args.decision_source == "forecast" else "")

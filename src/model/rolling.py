@@ -22,7 +22,7 @@ import pandas as pd
 
 from src.config import REPO_ROOT, AssumptionsConfig, MarketPriceBasisConfig, MarketTimingConfig, PathsConfig, SolverConfig
 from src.data.forecast_loader import DayPricePair, DayPrices, SkipRecord, load_forecast_run_ids, load_price_pair_range
-from src.model.build import AncillaryInputs
+from src.model.build import AncillaryInputs, terminal_value_eur_mwh
 from src.model.battery import Battery
 from src.model.solve import SolveResult
 from src.valuation.revenue import RevenueBreakdown, compute_revenue
@@ -228,11 +228,15 @@ def run_rolling(
         # Revenue is always settled on y_true, even for a forecast-driven
         # run (SPEC.md §6a) -- this is the only place settlement prices
         # are used, and they never reach the solver subprocess above.
+        # The terminal credit lambda is decision-side (what the solver
+        # valued leftover energy at), so it is derived from decision prices.
         revenue = compute_revenue(
             result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, _ancillary_for(pair.settlement),
+            battery=battery,
+            terminal_value_eur_mwh=terminal_value_eur_mwh(battery, pair.decision.day_ahead, cyclic_soc),
         )
         long_rows.extend(day_to_long_rows(solve_id, pair.decision, result, e_is_assumption))
-        daily_revenue_rows.append(revenue_to_row(pair.day, revenue))
+        daily_revenue_rows.append(revenue_to_row(pair.day, revenue, result, pair.settlement.grid.delta_t_hours))
 
     long_format = pd.DataFrame(long_rows, columns=LONG_FORMAT_COLUMNS)
     daily_revenue = pd.DataFrame(daily_revenue_rows)
@@ -242,7 +246,10 @@ def run_rolling(
     )
 
 
-def revenue_to_row(day: dt.date, revenue: RevenueBreakdown) -> dict:
+def revenue_to_row(day: dt.date, revenue: RevenueBreakdown, result: SolveResult, delta_t_hours: float) -> dict:
+    """`total` is NET revenue (gross - degradation), kept under its old name
+    so consumers of daily_revenue.parquet keep meaning "what the battery
+    earned". `terminal_credit` is a decision-side value and is not in `net`."""
     return {
         "solve_date": day,
         "day_ahead": revenue.day_ahead,
@@ -251,7 +258,13 @@ def revenue_to_row(day: dt.date, revenue: RevenueBreakdown) -> dict:
         "afrr_neg": revenue.afrr_neg,
         "activation": revenue.activation,
         "activation_is_assumption": True,
-        "total": revenue.total,
+        "gross": revenue.gross,
+        "degradation": revenue.degradation,
+        "net": revenue.net,
+        "total": revenue.net,
+        "terminal_credit": revenue.terminal_credit,
+        "charged_mwh": float(result.p_ch.sum() * delta_t_hours),
+        "discharged_mwh": float(result.p_dis.sum() * delta_t_hours),
     }
 
 
@@ -283,7 +296,12 @@ def build_run_meta(
     Part B) — the one record src/results_catalogue.py's scan_runs reads
     per run, and what batch.py fingerprints against for resumability.
     """
-    total_revenue_eur = float(result.daily_revenue["total"].sum()) if not result.daily_revenue.empty else 0.0
+    dr = result.daily_revenue
+    gross_eur = float(dr["gross"].sum()) if not dr.empty else 0.0
+    degradation_eur = float(dr["degradation"].sum()) if not dr.empty else 0.0
+    net_eur = float(dr["net"].sum()) if not dr.empty else 0.0
+    usable_mwh = battery.soc_max_mwh - battery.soc_min_mwh
+    equivalent_full_cycles = float(dr["discharged_mwh"].sum() / usable_mwh) if not dr.empty else 0.0
     forecast_run_ids = (
         load_forecast_run_ids(paths_config, result.forecast_model)
         if result.decision_source == "forecast" and result.forecast_model is not None
@@ -300,11 +318,16 @@ def build_run_meta(
         "n_days_solved": len(result.daily_revenue),
         "n_days_skipped": len(result.skip_log),
         "battery": {
+            "power_nominal_mw": battery.power_nominal_mw,
+            "power_derating_factor": battery.power_derating_factor,
             "power_mw": battery.power_mw,
             "energy_mwh": battery.energy_mwh,
             "round_trip_efficiency": battery.round_trip_efficiency,
             "soc_min_fraction": battery.soc_min_fraction,
             "soc_max_fraction": battery.soc_max_fraction,
+            "aux_load_mw": battery.aux_load_mw,
+            "degradation_cost_eur_mwh": battery.degradation_cost_eur_mwh,
+            "terminal_value": battery.terminal_value,
         },
         "solver": {
             "name": solver_config.name,
@@ -324,7 +347,11 @@ def build_run_meta(
             "afrr_reserve_hours": assumptions.afrr_reserve_hours,
         },
         "price_basis": dict(price_basis.basis_by_market),
-        "total_revenue_eur": total_revenue_eur,
+        "gross_revenue_eur": gross_eur,
+        "degradation_cost_eur": degradation_eur,
+        "net_revenue_eur": net_eur,
+        "total_revenue_eur": net_eur,
+        "equivalent_full_cycles": equivalent_full_cycles,
         "forecast_repo_path": str(paths_config.forecast_repo_path),
         "forecast_run_ids": forecast_run_ids,
         "git_commit": _git_commit(),

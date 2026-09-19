@@ -35,8 +35,10 @@ def _fake_result() -> RollingRunResult:
     long_format = pd.DataFrame(rows)
     daily_revenue = pd.DataFrame(
         [
-            {"solve_date": day1, "day_ahead": 100.0, "fcr": 20.0, "afrr_pos": 5.0, "afrr_neg": 5.0, "activation": 70.0, "total": 200.0},
-            {"solve_date": day2, "day_ahead": 50.0, "fcr": 0.0, "afrr_pos": 0.0, "afrr_neg": 0.0, "activation": 0.0, "total": 50.0},
+            {"solve_date": day1, "day_ahead": 100.0, "fcr": 20.0, "afrr_pos": 5.0, "afrr_neg": 5.0, "activation": 70.0,
+             "gross": 200.0, "degradation": 0.0, "net": 200.0, "total": 200.0},
+            {"solve_date": day2, "day_ahead": 50.0, "fcr": 0.0, "afrr_pos": 0.0, "afrr_neg": 0.0, "activation": 0.0,
+             "gross": 50.0, "degradation": 0.0, "net": 50.0, "total": 50.0},
         ]
     )
     return RollingRunResult(solve_id="fake", long_format=long_format, daily_revenue=daily_revenue, skip_log=[])
@@ -86,4 +88,8 @@ def test_main_runs_end_to_end_and_prints_expected_sections(capsys):
     assert "day_ahead_only" in out
     assert "naive" in out
     assert "full_cooptimized" in out
-    assert "total revenue" in out
+    assert "BATTERY IN EFFECT FOR THIS RUN" in out
+    assert "4.5 MW operational" in out
+    assert "gross revenue" in out
+    assert "degradation" in out
+    assert "net revenue" in out

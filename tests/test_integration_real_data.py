@@ -57,8 +57,8 @@ def test_real_day_end_to_end():
     assert (result.e <= battery.soc_max_mwh + TOL).all()
     assert (result.c_fcr <= 0.8 * battery.power_mw + TOL).all()
 
-    revenue = compute_revenue(result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary)
-    assert revenue.total == pytest.approx(result.objective_value, rel=1e-6)
+    revenue = compute_revenue(result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary, battery=battery)
+    assert revenue.net + revenue.terminal_credit == pytest.approx(result.objective_value, rel=1e-6)
 
 
 # ---- forecast-driven, real DST day (SPEC.md §6a) --------------------------

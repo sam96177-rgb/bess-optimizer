@@ -18,8 +18,8 @@ afrr_activation:
   #
   # Real replacement: activation volumes published on Netztransparenz.de,
   # aggregated into an empirical activation rate per block/season.
-  alpha_pos: 0.10  # PLACEHOLDER, unconfirmed
-  alpha_neg: 0.10  # PLACEHOLDER, unconfirmed
+  alpha_pos: 0.05  # PLACEHOLDER, unconfirmed (v2 spec value)
+  alpha_neg: 0.05  # PLACEHOLDER, unconfirmed (v2 spec value)
 
   # EUR/MWh received for energy actually delivered during an aFRR
   # activation. Assumed because this repo has no activation-price feed;

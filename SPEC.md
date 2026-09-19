@@ -98,7 +98,7 @@ separate piece of work — do not build it now.
 | Time grid | 15-minute unified grid, Δt = 0.25 h, consistent with `resample.py` |
 | Price input | `y_true` from the forecast repo's `results/*.parquet` |
 | Markets | All four, co-optimized |
-| Battery | 1 MW / 2 MWh, 88% round-trip efficiency, SOC 5–95%, **no degradation cost in v1** |
+| Battery | v1: 1 MW / 2 MWh, 88% RTE, SOC 5–95%, no degradation cost. **v2 (PLAN_V2_DISPATCH.md Phase 1): 10 MWh / 5 MW x 0.9 derating, 90% RTE, SOC 10–90%, 50 kW aux load, EUR 8/MWh degradation** — see `config/battery.yaml` |
 | aFRR energy activation | Modelled via an **assumed** activation rate (see below) |
 | Scope of v1 | Parquet output + CLI summary. **No Streamlit dashboard** — that is a later session |
 | Repo | New repo, `git init`, sibling to `bess-market-forecast` |
@@ -246,7 +246,7 @@ Flag any mismatch between this spec and what you actually find.
 ```
 bess-optimizer/
   config/
-    battery.yaml          # 1 MW / 2 MWh, 88% RTE, SOC 5–95%
+    battery.yaml          # v2: 10 MWh / 4.5 MW operational, 90% RTE, SOC 10–90%, aux, degradation
     assumptions.yaml      # §3 assumptions, each commented
     solver.yaml           # solver choice, flags, tolerances
   src/

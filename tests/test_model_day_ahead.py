@@ -1,3 +1,4 @@
+import dataclasses
 import math
 
 import numpy as np
@@ -13,6 +14,8 @@ from src.valuation.revenue import compute_revenue
 TOL = 1e-4
 
 BATTERY = battery_from_config(load_battery_config())
+# Closed-form expectations below assume a lossless-of-aux, free-cycling battery.
+IDEAL_BATTERY = dataclasses.replace(BATTERY, aux_load_mw=0.0, degradation_cost_eur_mwh=0.0)
 SOLVER = load_solver_config()
 DELTA_T = 0.25
 
@@ -29,10 +32,11 @@ def _random_prices(seed: int = 0) -> pd.Series:
 
 
 def _solve(prices: pd.Series, **kwargs):
+    battery = kwargs.pop("battery", BATTERY)
     model = build_model(
         steps=STEPS,
         day_ahead_prices=prices,
-        battery=BATTERY,
+        battery=battery,
         delta_t_hours=DELTA_T,
         **kwargs,
     )
@@ -71,6 +75,7 @@ def test_energy_reconciles_with_round_trip_efficiency():
             prev
             + BATTERY.eta * DELTA_T * result.p_ch.iloc[t]
             - (DELTA_T / BATTERY.eta) * result.p_dis.iloc[t]
+            - BATTERY.aux_load_mw * DELTA_T
         )
         assert expected == pytest.approx(result.e.iloc[t], abs=1e-6)
         prev = result.e.iloc[t]
@@ -80,8 +85,12 @@ def test_revenue_recomputed_independently_matches_solver_objective():
     prices = _random_prices()
     model = build_model(steps=STEPS, day_ahead_prices=prices, battery=BATTERY, delta_t_hours=DELTA_T)
     result = solve_model(model, SOLVER)
-    revenue = compute_revenue(result, prices, DELTA_T)
-    assert revenue.total == pytest.approx(result.objective_value, rel=1e-6)
+    revenue = compute_revenue(result, prices, DELTA_T, battery=BATTERY)
+    assert revenue.degradation > 0
+    assert revenue.net == pytest.approx(revenue.gross - revenue.degradation)
+    # Cyclic SOC -> no terminal credit, so net revenue is the whole objective.
+    assert revenue.terminal_credit == 0.0
+    assert revenue.net + revenue.terminal_credit == pytest.approx(result.objective_value, rel=1e-6)
 
 
 # ---- known-answer test -------------------------------------------------
@@ -101,7 +110,7 @@ def test_known_answer_two_price_day_full_cycle():
     prices.loc[cheap_window] = 0.0
     prices.loc[expensive_window] = 1000.0
 
-    result = _solve(prices)
+    result = _solve(prices, battery=IDEAL_BATTERY)
 
     delta_e_max = BATTERY.soc_max_mwh - BATTERY.soc_min_mwh
     expected_objective = 1000.0 * delta_e_max * BATTERY.eta
@@ -141,5 +150,6 @@ def test_non_cyclic_soc_starts_from_given_initial_soc():
         BATTERY.soc_min_mwh
         + BATTERY.eta * DELTA_T * result.p_ch.iloc[0]
         - (DELTA_T / BATTERY.eta) * result.p_dis.iloc[0]
+        - BATTERY.aux_load_mw * DELTA_T
     )
     assert result.e.iloc[0] == pytest.approx(expected_e0, abs=1e-6)
