@@ -7,6 +7,7 @@ through to a skip log rather than vanishing silently.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import pickle
 import subprocess
@@ -20,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import REPO_ROOT, AssumptionsConfig, MarketPriceBasisConfig, MarketTimingConfig, PathsConfig, SolverConfig
-from src.data.forecast_loader import DayPrices, SkipRecord, load_price_range
+from src.data.forecast_loader import DayPricePair, DayPrices, SkipRecord, load_forecast_run_ids, load_price_pair_range
 from src.model.build import AncillaryInputs
 from src.model.battery import Battery
 from src.model.solve import SolveResult
@@ -37,6 +38,9 @@ class RollingRunResult:
     long_format: pd.DataFrame
     daily_revenue: pd.DataFrame
     skip_log: list[SkipRecord]
+    decision_source: str = "realized"
+    forecast_model: str | None = None
+    forecast_quantile: float | None = None
 
 
 def day_to_long_rows(solve_id: str, day_prices: DayPrices, result: SolveResult, e_is_assumption: bool) -> list[dict]:
@@ -152,17 +156,28 @@ def run_rolling(
     include_activation_in_soc: bool = True,
     include_ancillary: bool = True,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
 ) -> RollingRunResult:
     """The MILP-based strategies (SPEC.md Milestone 5's main run, and
     Milestone 6's day-ahead-only benchmark) share this loop. Set
     include_ancillary=False for day-ahead-only arbitrage with no capacity
     markets at all (build_model's ancillary=None path) — assumptions and
     price_basis are then not needed and may be omitted.
+
+    decision_source="forecast" makes the solver decide on forecast_model's
+    y_pred (at forecast_quantile) while revenue is still settled on y_true
+    (SPEC.md §6a: decide on forecast, settle on realized) — see
+    src/data/forecast_loader.py's DayPricePair.
     """
     if include_ancillary and (assumptions is None or price_basis is None):
         raise ValueError("assumptions and price_basis are required when include_ancillary=True")
 
-    days_ok, skip_log = load_price_range(start_date, end_date, day_ahead_timing, capacity_timing, paths_config)
+    pairs, skip_log = load_price_pair_range(
+        start_date, end_date, day_ahead_timing, capacity_timing, paths_config,
+        decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+    )
 
     solve_id = str(uuid.uuid4())
     e_is_assumption = include_ancillary and include_activation_in_soc
@@ -184,39 +199,47 @@ def run_rolling(
     if cyclic_soc:
         # Each day is fully independent (no SOC carried across the
         # boundary), so they can be solved concurrently -- each still in
-        # its own subprocess.
-        def _task(day_prices: DayPrices) -> tuple[DayPrices, SolveResult]:
+        # its own subprocess. The solver only ever sees pair.decision --
+        # pair.settlement (y_true) is not part of the subprocess payload.
+        def _task(pair: DayPricePair) -> tuple[DayPricePair, SolveResult]:
             result = _solve_day_via_subprocess(
-                day_prices, battery, solver_config, cyclic_soc, enforce_exclusivity, None, _ancillary_for(day_prices),
+                pair.decision, battery, solver_config, cyclic_soc, enforce_exclusivity, None, _ancillary_for(pair.decision),
             )
-            return day_prices, result
+            return pair, result
 
         with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4))) as pool:
-            solved = list(pool.map(_task, days_ok))
+            solved = list(pool.map(_task, pairs))
     else:
         # Day N+1's initial SOC depends on day N's solved ending SOC, so
         # this chain must run in order.
         solved = []
         carried_soc_mwh: float | None = None
-        for day_prices in days_ok:
+        for pair in pairs:
             initial_soc_mwh = carried_soc_mwh if carried_soc_mwh is not None else battery.soc_min_mwh
             result = _solve_day_via_subprocess(
-                day_prices, battery, solver_config, cyclic_soc, enforce_exclusivity, initial_soc_mwh, _ancillary_for(day_prices),
+                pair.decision, battery, solver_config, cyclic_soc, enforce_exclusivity, initial_soc_mwh, _ancillary_for(pair.decision),
             )
             carried_soc_mwh = float(result.e.iloc[-1])
-            solved.append((day_prices, result))
+            solved.append((pair, result))
 
     long_rows: list[dict] = []
     daily_revenue_rows: list[dict] = []
-    for day_prices, result in solved:
-        ancillary = _ancillary_for(day_prices)
-        revenue = compute_revenue(result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary)
-        long_rows.extend(day_to_long_rows(solve_id, day_prices, result, e_is_assumption))
-        daily_revenue_rows.append(revenue_to_row(day_prices.day, revenue))
+    for pair, result in solved:
+        # Revenue is always settled on y_true, even for a forecast-driven
+        # run (SPEC.md §6a) -- this is the only place settlement prices
+        # are used, and they never reach the solver subprocess above.
+        revenue = compute_revenue(
+            result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, _ancillary_for(pair.settlement),
+        )
+        long_rows.extend(day_to_long_rows(solve_id, pair.decision, result, e_is_assumption))
+        daily_revenue_rows.append(revenue_to_row(pair.day, revenue))
 
     long_format = pd.DataFrame(long_rows, columns=LONG_FORMAT_COLUMNS)
     daily_revenue = pd.DataFrame(daily_revenue_rows)
-    return RollingRunResult(solve_id=solve_id, long_format=long_format, daily_revenue=daily_revenue, skip_log=skip_log)
+    return RollingRunResult(
+        solve_id=solve_id, long_format=long_format, daily_revenue=daily_revenue, skip_log=skip_log,
+        decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+    )
 
 
 def revenue_to_row(day: dt.date, revenue: RevenueBreakdown) -> dict:
@@ -232,12 +255,107 @@ def revenue_to_row(day: dt.date, revenue: RevenueBreakdown) -> dict:
     }
 
 
-def write_rolling_run_results(result: RollingRunResult, results_dir) -> None:
+def _git_commit() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        )
+        return proc.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def build_run_meta(
+    result: RollingRunResult,
+    strategy: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    battery: Battery,
+    solver_config: SolverConfig,
+    assumptions: AssumptionsConfig,
+    price_basis: MarketPriceBasisConfig,
+    paths_config: PathsConfig,
+    cyclic_soc: bool = True,
+    enforce_exclusivity: bool = True,
+    include_activation_in_soc: bool = True,
+) -> dict:
+    """Assembles the run_meta.json sidecar (SPEC.md §6a / Milestone 8
+    Part B) — the one record src/results_catalogue.py's scan_runs reads
+    per run, and what batch.py fingerprints against for resumability.
+    """
+    total_revenue_eur = float(result.daily_revenue["total"].sum()) if not result.daily_revenue.empty else 0.0
+    forecast_run_ids = (
+        load_forecast_run_ids(paths_config, result.forecast_model)
+        if result.decision_source == "forecast" and result.forecast_model is not None
+        else {}
+    )
+    return {
+        "solve_id": result.solve_id,
+        "strategy": strategy,
+        "decision_source": result.decision_source,
+        "forecast_model": result.forecast_model,
+        "forecast_quantile": result.forecast_quantile,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "n_days_solved": len(result.daily_revenue),
+        "n_days_skipped": len(result.skip_log),
+        "battery": {
+            "power_mw": battery.power_mw,
+            "energy_mwh": battery.energy_mwh,
+            "round_trip_efficiency": battery.round_trip_efficiency,
+            "soc_min_fraction": battery.soc_min_fraction,
+            "soc_max_fraction": battery.soc_max_fraction,
+        },
+        "solver": {
+            "name": solver_config.name,
+            "mip_gap": solver_config.mip_gap,
+            "time_limit_seconds": solver_config.time_limit_seconds,
+        },
+        "model_flags": {
+            "cyclic_soc": cyclic_soc,
+            "enforce_exclusivity": enforce_exclusivity,
+            "include_activation_in_soc": include_activation_in_soc,
+        },
+        "assumptions": {
+            "alpha_pos": assumptions.alpha_pos,
+            "alpha_neg": assumptions.alpha_neg,
+            "activation_energy_price_eur_mwh": assumptions.activation_energy_price_eur_mwh,
+            "fcr_reserve_hours": assumptions.fcr_reserve_hours,
+            "afrr_reserve_hours": assumptions.afrr_reserve_hours,
+        },
+        "price_basis": dict(price_basis.basis_by_market),
+        "total_revenue_eur": total_revenue_eur,
+        "forecast_repo_path": str(paths_config.forecast_repo_path),
+        "forecast_run_ids": forecast_run_ids,
+        "git_commit": _git_commit(),
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+
+def write_rolling_run_results(
+    result: RollingRunResult,
+    results_dir,
+    *,
+    strategy: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    battery: Battery,
+    solver_config: SolverConfig,
+    assumptions: AssumptionsConfig,
+    price_basis: MarketPriceBasisConfig,
+    paths_config: PathsConfig,
+    cyclic_soc: bool = True,
+    enforce_exclusivity: bool = True,
+    include_activation_in_soc: bool = True,
+) -> None:
     """Persists a run's outputs under results/. Kept separate from
     run_rolling itself so the solve logic stays testable without disk I/O.
-    """
-    from pathlib import Path
 
+    run_meta.json is written LAST, after both parquets and the skip log,
+    so a run that crashes mid-write leaves no sidecar -- it stays
+    invisible to results_catalogue.scan_runs and gets retried by batch.py
+    rather than being mistaken for a completed run.
+    """
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     run_dir = results_dir / result.solve_id
@@ -246,5 +364,16 @@ def write_rolling_run_results(result: RollingRunResult, results_dir) -> None:
     result.long_format.to_parquet(run_dir / "long_format.parquet", index=False)
     result.daily_revenue.to_parquet(run_dir / "daily_revenue.parquet", index=False)
 
-    skip_df = pd.DataFrame([{"day": s.day, "reason": s.reason} for s in result.skip_log])
+    # Explicit columns even when skip_log is empty, so the file always has
+    # a header row -- a column-less empty CSV can't be read back by
+    # pd.read_csv (EmptyDataError), which would make a clean run's own
+    # skip log unreadable.
+    skip_df = pd.DataFrame([{"day": s.day, "reason": s.reason} for s in result.skip_log], columns=["day", "reason"])
     skip_df.to_csv(run_dir / "skip_log.csv", index=False)
+
+    meta = build_run_meta(
+        result, strategy, start_date, end_date, battery, solver_config, assumptions, price_basis, paths_config,
+        cyclic_soc=cyclic_soc, enforce_exclusivity=enforce_exclusivity, include_activation_in_soc=include_activation_in_soc,
+    )
+    with open(run_dir / "run_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)

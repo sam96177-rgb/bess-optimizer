@@ -15,7 +15,7 @@ from src.config import (
     load_paths_config,
     load_solver_config,
 )
-from src.data.forecast_loader import load_day_prices, load_raw_y_true
+from src.data.forecast_loader import DayPricePair, SkipRecord, load_day_prices, load_price_pair_range, load_raw_y_true
 from src.model.battery import battery_from_config
 from src.model.build import AncillaryInputs, build_model
 from src.model.solve import solve_model
@@ -59,3 +59,45 @@ def test_real_day_end_to_end():
 
     revenue = compute_revenue(result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary)
     assert revenue.total == pytest.approx(result.objective_value, rel=1e-6)
+
+
+# ---- forecast-driven, real DST day (SPEC.md §6a) --------------------------
+
+def test_real_dst_day_skips_for_seasonal_naive_but_solves_for_lgbm_point():
+    """2026-03-29 is the DST day seasonal_naive's 'same block last week'
+    lookup can't resolve, producing NaN y_pred for that day in all three
+    capacity markets (Verified facts) -- a forecast-driven run must skip
+    it with a decision-side reason. lgbm_point has no such gap and must
+    solve the identical day cleanly on the identical settlement (y_true)
+    prices.
+    """
+    paths = load_paths_config()
+    timings = load_market_timing_configs(paths)
+    day = dt.date(2026, 3, 29)
+
+    seasonal_pairs, seasonal_skipped = load_price_pair_range(
+        day, day, timings["day_ahead"], timings["fcr"], paths,
+        decision_source="forecast", forecast_model="seasonal_naive", forecast_quantile=0.5,
+    )
+    assert seasonal_pairs == []
+    assert len(seasonal_skipped) == 1
+    skip = seasonal_skipped[0]
+    assert isinstance(skip, SkipRecord)
+    assert skip.day == day
+    assert skip.reason.startswith("decision (seasonal_naive q0.5):")
+    assert "fcr" in skip.reason
+
+    point_pairs, point_skipped = load_price_pair_range(
+        day, day, timings["day_ahead"], timings["fcr"], paths,
+        decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
+    )
+    assert point_skipped == []
+    assert len(point_pairs) == 1
+    pair = point_pairs[0]
+    assert isinstance(pair, DayPricePair)
+    assert pair.day == day
+    assert not pair.decision.day_ahead.isna().any()
+    assert not pair.settlement.day_ahead.isna().any()
+    # decide-on-forecast/settle-on-realized: the two sides are genuinely
+    # different price series, not the same y_true reused for both.
+    assert not pair.decision.day_ahead.equals(pair.settlement.day_ahead)

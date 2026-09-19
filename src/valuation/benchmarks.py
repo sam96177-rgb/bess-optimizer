@@ -26,7 +26,7 @@ from src.config import (
     PathsConfig,
     SolverConfig,
 )
-from src.data.forecast_loader import DayPrices, load_price_range
+from src.data.forecast_loader import DayPrices, load_price_pair_range
 from src.model.battery import Battery
 from src.model.build import build_model
 from src.model.rolling import LONG_FORMAT_COLUMNS, RollingRunResult, day_to_long_rows, revenue_to_row, run_rolling
@@ -44,6 +44,9 @@ def run_day_ahead_only_benchmark(
     cyclic_soc: bool = True,
     enforce_exclusivity: bool = True,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
 ) -> RollingRunResult:
     return run_rolling(
         start_date=start_date,
@@ -56,6 +59,9 @@ def run_day_ahead_only_benchmark(
         enforce_exclusivity=enforce_exclusivity,
         include_ancillary=False,
         paths_config=paths_config,
+        decision_source=decision_source,
+        forecast_model=forecast_model,
+        forecast_quantile=forecast_quantile,
     )
 
 
@@ -71,6 +77,9 @@ def run_full_cooptimized_benchmark(
     cyclic_soc: bool = True,
     enforce_exclusivity: bool = True,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
 ) -> RollingRunResult:
     return run_rolling(
         start_date=start_date,
@@ -85,6 +94,9 @@ def run_full_cooptimized_benchmark(
         enforce_exclusivity=enforce_exclusivity,
         include_ancillary=True,
         paths_config=paths_config,
+        decision_source=decision_source,
+        forecast_model=forecast_model,
+        forecast_quantile=forecast_quantile,
     )
 
 
@@ -112,6 +124,12 @@ def simulate_naive_day(day_prices: DayPrices, battery: Battery, starting_soc_mwh
     other step. No lookahead, no optimization -- a naive rule, not a
     solver result, but returned in the same SolveResult shape so it can
     reuse compute_revenue and rolling.day_to_long_rows unmodified.
+
+    `day_prices` is the DECISION side (SPEC.md §6a) -- the cheapest/
+    priciest block picks and objective_value both reflect what the rule
+    expected to earn at decision time, not what it actually earned. Call
+    this with pair.decision; settle separately via compute_revenue on
+    pair.settlement.
     """
     cheapest_block, priciest_block = _cheapest_and_priciest_blocks(day_prices)
     dt_h = day_prices.grid.delta_t_hours
@@ -154,6 +172,9 @@ def run_naive_benchmark(
     capacity_timing: MarketTimingConfig,
     reset_daily_soc: bool = True,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
 ) -> RollingRunResult:
     """reset_daily_soc=True (default) starts every day at soc_min,
     matching the MILP strategies' cyclic_soc=True convention (SPEC.md
@@ -163,26 +184,36 @@ def run_naive_benchmark(
     (it isn't an optimization), so 'reset' here just means each day's
     simulation starts fresh rather than continuing from the prior day's
     ending SOC.
+
+    decision_source="forecast" picks the cheapest/priciest block from
+    forecast_model's y_pred but always settles revenue on y_true (SPEC.md
+    §6a) -- see simulate_naive_day.
     """
-    days_ok, skip_log = load_price_range(start_date, end_date, day_ahead_timing, capacity_timing, paths_config)
+    pairs, skip_log = load_price_pair_range(
+        start_date, end_date, day_ahead_timing, capacity_timing, paths_config,
+        decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+    )
 
     solve_id = str(uuid.uuid4())
     long_rows: list[dict] = []
     daily_revenue_rows: list[dict] = []
 
     soc = battery.soc_min_mwh
-    for day_prices in days_ok:
+    for pair in pairs:
         starting_soc = battery.soc_min_mwh if reset_daily_soc else soc
-        result = simulate_naive_day(day_prices, battery, starting_soc)
+        result = simulate_naive_day(pair.decision, battery, starting_soc)
         soc = float(result.e.iloc[-1])
 
-        revenue = compute_revenue(result, day_prices.day_ahead, day_prices.grid.delta_t_hours, ancillary=None)
-        long_rows.extend(day_to_long_rows(solve_id, day_prices, result, e_is_assumption=False))
-        daily_revenue_rows.append(revenue_to_row(day_prices.day, revenue))
+        revenue = compute_revenue(result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, ancillary=None)
+        long_rows.extend(day_to_long_rows(solve_id, pair.decision, result, e_is_assumption=False))
+        daily_revenue_rows.append(revenue_to_row(pair.day, revenue))
 
     long_format = pd.DataFrame(long_rows, columns=LONG_FORMAT_COLUMNS)
     daily_revenue = pd.DataFrame(daily_revenue_rows)
-    return RollingRunResult(solve_id=solve_id, long_format=long_format, daily_revenue=daily_revenue, skip_log=skip_log)
+    return RollingRunResult(
+        solve_id=solve_id, long_format=long_format, daily_revenue=daily_revenue, skip_log=skip_log,
+        decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+    )
 
 
 def run_all_benchmarks(
@@ -195,16 +226,22 @@ def run_all_benchmarks(
     day_ahead_timing: MarketTimingConfig,
     capacity_timing: MarketTimingConfig,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
 ) -> dict[str, RollingRunResult]:
     return {
         "day_ahead_only": run_day_ahead_only_benchmark(
             start_date, end_date, battery, solver_config, day_ahead_timing, capacity_timing, paths_config=paths_config,
+            decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         ),
         "naive": run_naive_benchmark(
             start_date, end_date, battery, day_ahead_timing, capacity_timing, paths_config=paths_config,
+            decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         ),
         "full_cooptimized": run_full_cooptimized_benchmark(
             start_date, end_date, battery, solver_config, assumptions, price_basis,
             day_ahead_timing, capacity_timing, paths_config=paths_config,
+            decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         ),
     }

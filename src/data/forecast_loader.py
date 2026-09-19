@@ -1,11 +1,17 @@
-"""Reads bess-market-forecast's results/*.parquet — y_true (realized
-prices) only, read-only (SPEC.md Hard Rule 3) — and aligns each day's
-prices onto that day's grid (src/data/grid.py). A day with any missing or
-NaN price in any of the four markets is skipped and logged with a reason;
-it is never zero-filled or interpolated (SPEC.md Hard Rule 1). This is
-also how the known 2026-09-13 hourly-instead-of-15-minute day gets
-handled: it isn't special-cased by date, it's just a day where day_ahead's
-15-min steps don't all have a value, so the same general check skips it.
+"""Reads bess-market-forecast's results/*.parquet, read-only (SPEC.md Hard
+Rule 3), and aligns each day's prices onto that day's grid
+(src/data/grid.py). A day with any missing or NaN price in any of the four
+markets is skipped and logged with a reason; it is never zero-filled or
+interpolated (SPEC.md Hard Rule 1). This is also how the known 2026-09-13
+hourly-instead-of-15-minute day gets handled: it isn't special-cased by
+date, it's just a day where day_ahead's 15-min steps don't all have a
+value, so the same general check skips it.
+
+Two price columns are available and they mean different things (SPEC.md
+§6a): `y_true` is the realized price and `y_pred` is what a given
+forecasting model predicted ahead of the market's gate closure. A
+forecast-driven run DECIDES on y_pred but must SETTLE on y_true — see
+DayPricePair below.
 """
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.config import MarketTimingConfig, PathsConfig, load_paths_config
+from src.config import _REQUIRED_MARKETS, MarketTimingConfig, PathsConfig, load_paths_config
 from src.data.grid import DayGrid, build_day_grid
 
 logger = logging.getLogger(__name__)
@@ -29,6 +35,24 @@ class DayPrices:
     fcr: pd.Series  # indexed by block index (grid.blocks[i].index)
     afrr_pos: pd.Series
     afrr_neg: pd.Series
+
+
+@dataclass(frozen=True)
+class DayPricePair:
+    """The two price views of one delivery day. `decision` is what the
+    optimizer is allowed to see when it commits (y_pred for a
+    forecast-driven run, y_true for a perfect-foresight one); `settlement`
+    is always y_true, because that is what the schedule actually earns.
+
+    Kept as a pair of DayPrices rather than as extra fields on DayPrices
+    itself: DayPrices is pickled into the per-day solver subprocess
+    (src/model/rolling.py), and the settlement prices have no business
+    being shipped to the solver — it must not be able to see them.
+    """
+
+    day: dt.date
+    decision: DayPrices
+    settlement: DayPrices
 
 
 @dataclass(frozen=True)
@@ -66,6 +90,101 @@ def load_raw_y_true(paths_config: PathsConfig) -> pd.Series:
             "realized price — stop and investigate rather than picking one arbitrarily."
         )
     return full.set_index(["market", "target_time"])["y_true"].sort_index()
+
+
+def load_raw_y_pred(paths_config: PathsConfig, model: str, quantile: float) -> pd.Series:
+    """One predicted price per (market, target_time), for a single
+    forecasting model at a single quantile.
+
+    Unlike y_true, y_pred genuinely differs per model and per quantile, so
+    this filters rather than collapses. Verified against the real results:
+    (market, model, quantile, target_time) is unique across all 350,710
+    rows, with exactly one cutoff per target_time, so no horizon
+    disambiguation is needed — but it is asserted here anyway rather than
+    assumed, since a future multi-horizon backtest would break it silently.
+
+    NaN predictions are deliberately KEPT. A model can legitimately fail to
+    predict some periods (seasonal_naive produces NaN for the 2026-03-29
+    DST day and its one-week echo, because its 'same block last week'
+    lookup lands on an irregular day). Dropping them here would make those
+    periods look merely absent; keeping them lets load_day_prices skip the
+    day with a legible reason, which is also what src/model/build.py's own
+    NaN guards require.
+    """
+    files = sorted(paths_config.results_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No parquet files found in {paths_config.results_dir}")
+
+    columns = ["market", "model", "quantile", "target_time", "y_pred"]
+    frames = [pd.read_parquet(f, columns=columns) for f in files]
+    full = pd.concat(frames, ignore_index=True)
+
+    available_models = sorted(full["model"].unique())
+    if model not in available_models:
+        raise ValueError(f"Unknown forecast model '{model}'. Available: {available_models}")
+
+    for_model = full[full["model"] == model]
+    available_quantiles = sorted(for_model["quantile"].unique())
+    selected = for_model[for_model["quantile"] == quantile]
+    if selected.empty:
+        raise ValueError(
+            f"Forecast model '{model}' has no rows at quantile {quantile}. "
+            f"Available quantiles for this model: {available_quantiles}. "
+            "(Point models only produce the median, 0.5.)"
+        )
+
+    missing_markets = _REQUIRED_MARKETS - set(selected["market"].unique())
+    if missing_markets:
+        raise ValueError(
+            f"Forecast model '{model}' at quantile {quantile} is missing predictions for "
+            f"{sorted(missing_markets)}. All four markets are required to solve a day."
+        )
+
+    counts = selected.groupby(["market", "target_time"]).size()
+    if (counts > 1).any():
+        offending = counts[counts > 1].index.tolist()[:5]
+        raise ValueError(
+            f"Found multiple y_pred rows for the same (market, target_time) for model '{model}' "
+            f"at quantile {quantile}, e.g. {offending}. This loader assumes one prediction per "
+            "delivery period — stop and investigate (a multi-horizon backtest would cause this) "
+            "rather than picking one arbitrarily."
+        )
+    return selected.set_index(["market", "target_time"])["y_pred"].sort_index()
+
+
+def load_forecast_run_ids(paths_config: PathsConfig, model: str) -> dict[str, str]:
+    """One run_id per market for `model` — provenance only (run_meta.json's
+    forecast_run_ids field), not used in any price calculation.
+
+    Verified against the real results: there are exactly 4 markets x 5
+    models = 20 parquet files, one per (market, model) pair, and each
+    file's run_id column is constant within it and equal to the filename.
+    Asserted here rather than assumed, for the same reason as
+    load_raw_y_pred's own uniqueness checks.
+    """
+    files = sorted(paths_config.results_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No parquet files found in {paths_config.results_dir}")
+
+    columns = ["market", "model", "run_id"]
+    frames = [pd.read_parquet(f, columns=columns) for f in files]
+    full = pd.concat(frames, ignore_index=True)
+
+    for_model = full[full["model"] == model]
+    if for_model.empty:
+        available_models = sorted(full["model"].unique())
+        raise ValueError(f"Unknown forecast model '{model}'. Available: {available_models}")
+
+    run_ids: dict[str, str] = {}
+    for market, group in for_model.groupby("market"):
+        distinct = group["run_id"].unique()
+        if len(distinct) != 1:
+            raise ValueError(
+                f"Expected exactly one run_id for model '{model}' in market '{market}', "
+                f"found {sorted(distinct)}."
+            )
+        run_ids[str(market)] = str(distinct[0])
+    return run_ids
 
 
 def _extract_day_ahead(raw: pd.Series, grid: DayGrid) -> pd.Series | None:
@@ -121,22 +240,76 @@ def load_price_range(
     capacity_timing: MarketTimingConfig,
     paths_config: PathsConfig | None = None,
 ) -> tuple[list[DayPrices], list[SkipRecord]]:
+    """Realized (perfect-foresight) prices for each day in the range."""
+    pairs, skipped = load_price_pair_range(
+        start_date, end_date, day_ahead_timing, capacity_timing, paths_config
+    )
+    return [pair.settlement for pair in pairs], skipped
+
+
+def load_price_pair_range(
+    start_date: dt.date,
+    end_date: dt.date,
+    day_ahead_timing: MarketTimingConfig,
+    capacity_timing: MarketTimingConfig,
+    paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
+) -> tuple[list[DayPricePair], list[SkipRecord]]:
+    """Decision and settlement prices for each day in the range.
+
+    decision_source="realized" is the perfect-foresight case: both sides
+    are the same y_true prices. decision_source="forecast" builds the
+    decision side from forecast_model's y_pred at forecast_quantile, while
+    settlement stays y_true.
+
+    A day is skipped if EITHER side is incomplete, because a day the
+    optimizer can decide on but not settle (or vice versa) cannot be
+    honestly valued. For a forecast-driven run the reason is prefixed so
+    the skip log says which side failed; for a realized run there is only
+    one price source, so the reason is left unprefixed.
+    """
     if start_date > end_date:
         raise ValueError(f"start_date {start_date} must not be after end_date {end_date}")
+    if decision_source not in ("realized", "forecast"):
+        raise ValueError(f"decision_source must be 'realized' or 'forecast', got '{decision_source}'")
+    if decision_source == "forecast" and (forecast_model is None or forecast_quantile is None):
+        raise ValueError("forecast_model and forecast_quantile are required when decision_source='forecast'")
 
     paths_config = paths_config or load_paths_config()
-    raw = load_raw_y_true(paths_config)
+    raw_true = load_raw_y_true(paths_config)
+    raw_decision = (
+        load_raw_y_pred(paths_config, forecast_model, forecast_quantile)
+        if decision_source == "forecast"
+        else raw_true
+    )
 
-    days_ok: list[DayPrices] = []
+    pairs: list[DayPricePair] = []
     skipped: list[SkipRecord] = []
     day = start_date
     while day <= end_date:
-        result = load_day_prices(day, raw, day_ahead_timing, capacity_timing)
-        if isinstance(result, SkipRecord):
-            logger.warning("Skipping %s: %s", result.day, result.reason)
-            skipped.append(result)
+        settlement = load_day_prices(day, raw_true, day_ahead_timing, capacity_timing)
+        if isinstance(settlement, SkipRecord):
+            reason = settlement.reason if decision_source == "realized" else f"settlement: {settlement.reason}"
+            record = SkipRecord(day, reason)
+            logger.warning("Skipping %s: %s", record.day, record.reason)
+            skipped.append(record)
+            day += dt.timedelta(days=1)
+            continue
+
+        if decision_source == "realized":
+            decision = settlement
         else:
-            days_ok.append(result)
+            decision = load_day_prices(day, raw_decision, day_ahead_timing, capacity_timing)
+            if isinstance(decision, SkipRecord):
+                record = SkipRecord(day, f"decision ({forecast_model} q{forecast_quantile}): {decision.reason}")
+                logger.warning("Skipping %s: %s", record.day, record.reason)
+                skipped.append(record)
+                day += dt.timedelta(days=1)
+                continue
+
+        pairs.append(DayPricePair(day=day, decision=decision, settlement=settlement))
         day += dt.timedelta(days=1)
 
-    return days_ok, skipped
+    return pairs, skipped

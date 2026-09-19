@@ -4,6 +4,8 @@ import pandas as pd
 import pytest
 
 from src.config import (
+    MarketTimingConfig,
+    PathsConfig,
     load_assumptions_config,
     load_battery_config,
     load_market_price_basis_config,
@@ -12,6 +14,7 @@ from src.config import (
     load_solver_config,
 )
 from src.data.forecast_loader import load_day_prices, load_raw_y_true
+from src.data.grid import build_day_grid
 from src.model.battery import battery_from_config
 from src.model.build import AncillaryInputs, build_model
 from src.model.rolling import LONG_FORMAT_COLUMNS, run_rolling, write_rolling_run_results
@@ -24,6 +27,18 @@ BATTERY = battery_from_config(load_battery_config())
 SOLVER = load_solver_config()
 ASSUMPTIONS = load_assumptions_config()
 PRICE_BASIS = load_market_price_basis_config()
+
+# Synthetic timing configs for the forecast-driven test below -- isolated
+# from the real sibling repo, same convention as
+# tests/test_forecast_loader.py's own synthetic edge cases.
+_SYNTH_DAY_AHEAD_TIMING = MarketTimingConfig(
+    name="day_ahead", timezone="Europe/Berlin", dst_convention="variable_period_count",
+    product_length_hours=0.25, delivery_start_local=dt.time(0, 0),
+)
+_SYNTH_FCR_TIMING = MarketTimingConfig(
+    name="fcr", timezone="Europe/Berlin", dst_convention="fixed_period_count",
+    product_length_hours=4, delivery_start_local=dt.time(0, 0),
+)
 
 
 def _run(start, end, **kwargs):
@@ -137,14 +152,115 @@ def test_cyclic_soc_false_carries_e_across_day_boundary():
     assert day2_e.iloc[0] == pytest.approx(expected_e0, abs=1e-4)
 
 
+# ---- forecast-driven: decide on y_pred, settle on y_true (SPEC.md §6a) ----
+
+def _write_wrong_step_fake_repo(tmp_path, day: dt.date, model: str, quantile: float) -> PathsConfig:
+    """One synthetic day, day-ahead only: y_true has the SAME cheap/
+    expensive window shape as test_model_day_ahead.py's own known-answer
+    test (cheap at steps[10:20], expensive at steps[50:60], flat 50
+    elsewhere) -- but y_pred has the two windows SWAPPED. A day-ahead-only
+    MILP decides on y_pred, so it schedules a full cyclic swing (verified
+    empirically for this exact 96-step/flat-50-elsewhere shape: charge
+    only in the predicted-cheap window, discharge only in the predicted-
+    expensive window, nothing elsewhere) at exactly the WRONG times.
+    Ancillary markets get flat, irrelevant prices -- load_day_prices still
+    requires them present even though include_ancillary=False ignores them.
+    """
+    grid = build_day_grid(day, _SYNTH_DAY_AHEAD_TIMING, _SYNTH_FCR_TIMING)
+    true_cheap, true_expensive = set(grid.steps[10:20]), set(grid.steps[50:60])
+    pred_cheap, pred_expensive = true_expensive, true_cheap  # swapped
+
+    def _price(step, cheap_set, expensive_set):
+        if step in cheap_set:
+            return 0.0
+        if step in expensive_set:
+            return 1000.0
+        return 50.0
+
+    rows = [
+        {
+            "market": "day_ahead", "target_time": step,
+            "y_true": _price(step, true_cheap, true_expensive),
+            "y_pred": _price(step, pred_cheap, pred_expensive),
+        }
+        for step in grid.steps
+    ]
+    for block in grid.blocks:
+        for market in ("fcr", "afrr_pos", "afrr_neg"):
+            rows.append({"market": market, "target_time": block.start, "y_true": 0.0, "y_pred": 0.0})
+
+    df = pd.DataFrame(rows)
+    df["model"] = model
+    df["quantile"] = quantile
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    df.to_parquet(results_dir / "fake.parquet")
+    return PathsConfig(forecast_repo_path=tmp_path)
+
+
+def test_forecast_driven_wrong_step_settles_worse_than_perfect_foresight(tmp_path):
+    """The most important new test for §6a: revenue settled at y_true for
+    a forecast that points at the wrong step must equal a hand-computed
+    value, and must be strictly worse than perfect foresight over the
+    same day -- proving decide-on-forecast/settle-on-realized actually
+    penalizes a bad forecast rather than quietly valuing it at its own
+    (wrong) prices.
+
+    Hand computation: the decision-side schedule (verified empirically --
+    see the docstring on _write_wrong_step_fake_repo) charges a full
+    cyclic swing (delta_e_max/eta raw MWh) only during the
+    predicted-cheap window, and discharges the same swing (delta_e_max*eta
+    MWh) only during the predicted-expensive window. Settling on y_true:
+    the predicted-cheap window is where y_true is actually 1000 (the
+    charge is a pure cost, no revenue there), and the predicted-expensive
+    window is where y_true is actually 0 (the discharge earns nothing) --
+    so settlement = -1000 * (delta_e_max / eta), a loss. Perfect foresight
+    on the same day/shape is the mirror image: +1000 * delta_e_max * eta
+    (matches tests/test_model_day_ahead.py's own known-answer test).
+    """
+    day = dt.date(2026, 6, 1)
+    model, quantile = "wrong_step_model", 0.5
+    fake_paths = _write_wrong_step_fake_repo(tmp_path, day, model, quantile)
+
+    forecast_result = run_rolling(
+        start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER,
+        day_ahead_timing=_SYNTH_DAY_AHEAD_TIMING, capacity_timing=_SYNTH_FCR_TIMING,
+        include_ancillary=False, paths_config=fake_paths,
+        decision_source="forecast", forecast_model=model, forecast_quantile=quantile,
+    )
+    perfect_result = run_rolling(
+        start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER,
+        day_ahead_timing=_SYNTH_DAY_AHEAD_TIMING, capacity_timing=_SYNTH_FCR_TIMING,
+        include_ancillary=False, paths_config=fake_paths,
+    )
+
+    delta_e_max = BATTERY.soc_max_mwh - BATTERY.soc_min_mwh
+    expected_settlement = -1000.0 * (delta_e_max / BATTERY.eta)
+    expected_perfect = 1000.0 * delta_e_max * BATTERY.eta
+
+    forecast_total = forecast_result.daily_revenue["total"].iloc[0]
+    perfect_total = perfect_result.daily_revenue["total"].iloc[0]
+
+    assert forecast_total == pytest.approx(expected_settlement, rel=1e-3)
+    assert perfect_total == pytest.approx(expected_perfect, rel=1e-3)
+    assert forecast_total < perfect_total
+
+
 def test_write_rolling_run_results(tmp_path):
-    result = _run(dt.date(2026, 6, 15), dt.date(2026, 6, 15))
-    write_rolling_run_results(result, tmp_path)
+    start, end = dt.date(2026, 6, 15), dt.date(2026, 6, 15)
+    result = _run(start, end)
+    write_rolling_run_results(
+        result, tmp_path,
+        strategy="full_cooptimized", start_date=start, end_date=end,
+        battery=BATTERY, solver_config=SOLVER, assumptions=ASSUMPTIONS, price_basis=PRICE_BASIS,
+        paths_config=PATHS,
+    )
 
     run_dir = tmp_path / result.solve_id
     assert (run_dir / "long_format.parquet").exists()
     assert (run_dir / "daily_revenue.parquet").exists()
     assert (run_dir / "skip_log.csv").exists()
+    assert (run_dir / "run_meta.json").exists()
 
     reloaded = pd.read_parquet(run_dir / "long_format.parquet")
     assert len(reloaded) == len(result.long_format)

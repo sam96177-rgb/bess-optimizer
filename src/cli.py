@@ -13,6 +13,7 @@ import sys
 
 from src.config import (
     CONFIG_DIR,
+    REPO_ROOT,
     load_assumptions_config,
     load_battery_config,
     load_market_price_basis_config,
@@ -21,8 +22,10 @@ from src.config import (
     load_solver_config,
 )
 from src.model.battery import Battery, battery_from_config
-from src.model.rolling import RollingRunResult
+from src.model.rolling import RollingRunResult, write_rolling_run_results
 from src.valuation.benchmarks import run_all_benchmarks
+
+DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 
 ACTIVATION_FRACTION_WARNING_THRESHOLD = 0.2
 
@@ -117,7 +120,22 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="BESS multi-market optimizer: benchmark comparison")
     parser.add_argument("--start-date", type=dt.date.fromisoformat, required=True)
     parser.add_argument("--end-date", type=dt.date.fromisoformat, required=True)
+    parser.add_argument(
+        "--decision-source", choices=["realized", "forecast"], default="realized",
+        help="'realized' is perfect foresight (y_true); 'forecast' decides on a model's y_pred "
+             "but still settles revenue on y_true (SPEC.md §6a).",
+    )
+    parser.add_argument("--forecast-model", default=None, help="Required when --decision-source=forecast.")
+    parser.add_argument("--forecast-quantile", type=float, default=0.5)
+    parser.add_argument(
+        "--write-results", action="store_true",
+        help="Persist each strategy's run to results/<solve_id>/ (long_format.parquet, "
+             "daily_revenue.parquet, skip_log.csv, run_meta.json).",
+    )
     args = parser.parse_args(argv)
+
+    if args.decision_source == "forecast" and args.forecast_model is None:
+        parser.error("--forecast-model is required when --decision-source=forecast")
 
     battery = battery_from_config(load_battery_config())
     solver = load_solver_config()
@@ -127,15 +145,28 @@ def main(argv: list[str] | None = None) -> None:
     timings = load_market_timing_configs(paths)
 
     print(format_assumptions_banner())
-    print(f"Run window: {args.start_date} to {args.end_date}\n")
+    print(f"Run window: {args.start_date} to {args.end_date}")
+    print(f"Decision source: {args.decision_source}"
+          + (f" (model={args.forecast_model}, quantile={args.forecast_quantile})" if args.decision_source == "forecast" else "")
+          + "\n")
 
     results = run_all_benchmarks(
         args.start_date, args.end_date, battery, solver, assumptions, price_basis,
         timings["day_ahead"], timings["fcr"], paths_config=paths,
+        decision_source=args.decision_source, forecast_model=args.forecast_model,
+        forecast_quantile=args.forecast_quantile if args.decision_source == "forecast" else None,
     )
     delta_t_hours = timings["day_ahead"].product_length_hours
     for name, result in results.items():
         print_summary(name, result, battery, delta_t_hours)
+        if args.write_results:
+            write_rolling_run_results(
+                result, DEFAULT_RESULTS_DIR,
+                strategy=name, start_date=args.start_date, end_date=args.end_date,
+                battery=battery, solver_config=solver, assumptions=assumptions, price_basis=price_basis,
+                paths_config=paths,
+            )
+            print(f"  -> wrote results/{result.solve_id}/\n")
 
 
 if __name__ == "__main__":

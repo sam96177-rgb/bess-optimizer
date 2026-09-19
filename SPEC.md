@@ -351,14 +351,42 @@ degradation costs, intraday re-optimization).
 
 ## 6. Out of scope — do not build
 
-- Any Streamlit or dashboard code.
-- Feeding the forecaster's `y_pred` / quantile columns into the optimizer.
+- ~~Any Streamlit or dashboard code.~~ — now in scope, see §6a.
+- ~~Feeding the forecaster's `y_pred` / quantile columns into the optimizer.~~ — now in scope, see §6a.
 - Stochastic optimization over quantiles.
 - Real activation-data ingestion.
 - Degradation modelling.
 - Intraday or real-time re-optimization.
 
 These are planned follow-ups. Building them now makes v1 unreviewable.
+
+---
+
+## 6a. Scope extension (Milestone 8) — forecast-driven runs + dashboard
+
+v1 (§2, §6) deliberately ran on `y_true` only — pure perfect foresight — to
+validate the optimizer's own logic before forecast error entered the
+picture. That validation is done (73/73 tests, real CLI solves). This
+milestone lifts the two struck-through §6 bullets above into scope:
+feeding `y_pred` into the optimizer, and building a dashboard.
+
+**Core design rule: decide on forecast, settle on realized.** The MILP is
+built from `y_pred` (a chosen model + quantile); revenue is always valued
+at `y_true`. Optimizing *and* valuing at `y_pred` would make an
+overconfident forecast look more profitable than it is, because the
+schedule would never be checked against reality.
+
+```
+cost of forecast error = perfect-foresight revenue − forecast-driven revenue
+                         (both settled at y_true, over the same day set)
+```
+
+This is implemented via `src/data/forecast_loader.py`'s `DayPricePair`
+(`decision` — y_pred or y_true — vs. `settlement` — always y_true), threaded
+through `src/model/rolling.py::run_rolling` and
+`src/valuation/benchmarks.py` as `decision_source` / `forecast_model` /
+`forecast_quantile` parameters. All other Hard Rules (§0) still apply
+unchanged, including Hard Rule 3 (forecast repo read-only).
 
 ---
 

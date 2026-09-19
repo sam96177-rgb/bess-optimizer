@@ -2,16 +2,20 @@
 
 A deterministic MILP optimizer that decides how to operate a 1 MW / 2 MWh
 battery energy storage system (BESS) across four German markets —
-day-ahead energy, FCR, aFRR+, aFRR- — **jointly**, on realized prices
-(`y_true`) from the sibling `bess-market-forecast` repo. It answers one
-question: given perfect foresight of what prices actually did, how much
-revenue could this battery have earned, and where does that revenue come
-from?
+day-ahead energy, FCR, aFRR+, aFRR- — **jointly**. It answers two
+questions: given perfect foresight of what prices actually did, how much
+revenue could this battery have earned and where does it come from
+(v1) — and given only a forecast model's prediction at decide-time, how
+much of that revenue is actually achievable once settled against what
+prices really did (Milestone 8 / §6a)?
 
-v1 deliberately uses realized prices, not forecasts. That isolates and
-validates the optimizer's own logic — the co-optimization constraints,
-the unit handling, the MILP formulation — before forecast error is
-introduced as a separate variable. See [Not built yet](#not-built-yet).
+v1 deliberately used only realized prices (`y_true`), to isolate and
+validate the optimizer's own logic — the co-optimization constraints, the
+unit handling, the MILP formulation — before forecast error entered the
+picture. That's done, so `SPEC.md` §6a lifted forecast-driven runs and a
+Streamlit dashboard into scope: **decide on forecast (`y_pred`), settle on
+realized (`y_true`)** — see [Forecast-driven runs](#forecast-driven-runs-spec-md-6a)
+and [Dashboard](#dashboard) below.
 
 Full build spec and milestone-by-milestone history: `SPEC.md`.
 
@@ -23,7 +27,7 @@ Full build spec and milestone-by-milestone history: `SPEC.md`.
 python -m venv .venv
 .venv\Scripts\activate          # Windows; use `source .venv/bin/activate` on Linux/macOS
 pip install -r requirements.txt
-pytest                          # 73 tests, a few minutes (several solve real MILPs)
+pytest                          # 101 tests, a few minutes (several solve real MILPs)
 ```
 
 Run the benchmark comparison over a date range:
@@ -58,21 +62,30 @@ src/
   config.py            # all config loaders + dataclasses; fails loudly on missing/invalid config
   data/
     grid.py             # 15-min day-ahead grid + 4h capacity blocks, incl. DST handling
-    forecast_loader.py  # reads bess-market-forecast's results/*.parquet, y_true only
+    forecast_loader.py  # reads bess-market-forecast's results/*.parquet: y_true (realized) and,
+                         #   per §6a, y_pred (a chosen model+quantile) via DayPricePair
   model/
     battery.py          # Battery dataclass (power/energy/efficiency/SOC bounds)
     build.py            # linopy model construction (single function serves both the
                          #   day-ahead-only and full multi-market models)
     solve.py             # solves + extracts a solution, fails loudly on non-optimal
-    rolling.py           # day-by-day orchestration across a date range
+    rolling.py           # day-by-day orchestration across a date range; writes the
+                          #   run_meta.json sidecar (write_rolling_run_results)
     _day_solve_worker.py # standalone worker: solves one day, invoked via subprocess
                           #   (see "Performance" below)
   valuation/
     revenue.py           # recomputes revenue independently of the solver's own objective
     benchmarks.py         # the three comparison strategies
-  cli.py                 # prints the summary + assumptions banner
-tests/                   # 73 tests; several run against the real sibling repo (read-only)
-results/                 # rolling-run outputs land here (write_rolling_run_results)
+  results_catalogue.py   # scan_runs(): one row per results/<solve_id>/run_meta.json,
+                          #   the discovery path shared by the CLI, batch.py, and the dashboard
+  batch.py                # python -m src.batch: solves the model x strategy results matrix,
+                           #   resuming already-solved combinations
+  cli.py                  # prints the summary + assumptions banner
+app/                      # Streamlit dashboard (streamlit run app/streamlit_app.py) --
+                           #   see "Dashboard" below
+tests/                   # 101 tests; several run against the real sibling repo (read-only)
+results/                 # run outputs land here: results/<solve_id>/{long_format,daily_revenue}
+                          #   .parquet, skip_log.csv, run_meta.json (write_rolling_run_results)
 ```
 
 ---
@@ -241,23 +254,88 @@ N+1's initial SOC depends on day N's solved result).
 
 ---
 
+## Forecast-driven runs (`SPEC.md` §6a)
+
+Beyond perfect foresight, the optimizer can now **decide** on a chosen
+forecast model's `y_pred` while always **settling** revenue on `y_true` —
+optimizing and valuing both at `y_pred` would make an overconfident
+forecast look more profitable than it is, since the schedule would never
+be checked against reality:
+
+```
+cost of forecast error = perfect-foresight revenue − forecast-driven revenue
+                         (both settled at y_true, over the same day set)
+```
+
+```bash
+python -m src.cli --start-date 2026-06-15 --end-date 2026-06-17 \
+    --decision-source forecast --forecast-model lgbm_quantile_tuned --write-results
+```
+
+`--forecast-quantile` defaults to 0.5 (the median); point models
+(`seasonal_naive`, `linear_lags`, `lgbm_point`) only have that quantile.
+`--write-results` persists each strategy's run to
+`results/<solve_id>/` (see below).
+
+To solve the full model x strategy matrix and populate the dashboard:
+
+```bash
+python -m src.batch --dry-run   # see the matrix without solving anything
+python -m src.batch             # run it -- ~1.5-3h for the default 164-day window; run in the background
+```
+
+`batch.py` resumes automatically: re-running the same command skips any
+`(strategy, decision_source, forecast_model, forecast_quantile,
+start_date, end_date)` combination that already has a matching run on
+disk (same battery/solver/assumptions config), unless `--force`.
+
+---
+
+## Dashboard
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Reads only `results/<solve_id>/` sidecars (via `src/results_catalogue.py`)
+and the sibling repo's `results/*.parquet` (read-only) — never solves
+anything itself, so solve first (`--write-results` or `python -m
+src.batch`). Three pages:
+
+- **Dispatch Explorer** — pick a model, quantile, strategy, and date
+  window: the day-ahead forecast fan vs. realized price, battery
+  dispatch/SOC, ancillary capacity commitments per 4h block, and daily +
+  cumulative revenue against the matching perfect-foresight run.
+- **Forecast Error Cost** — a models x strategies matrix of the cost of
+  forecast error defined above, with day sets intersected before
+  differencing (see [Risks](#not-built-yet) below) and the dropped-day
+  count shown alongside so a large gap isn't hidden.
+- **Run Catalogue** — every solved run and, for a selected one, its skip
+  log.
+
+---
+
 ## Not built yet
 
-Out of scope for v1 by design (`SPEC.md` §6) — these are real follow-ups,
-not oversights:
+Out of scope by design — these are real follow-ups, not oversights:
 
-- **Forecast-driven runs.** Only `y_true` (realized prices) is used.
-  Feeding the forecaster's `y_pred`/quantile columns in — and the
-  stochastic-optimization question that raises — is separate future work.
-- **Dashboard.** No Streamlit or other UI; CLI + parquet output only.
+- **Stochastic optimization over quantiles.** Forecast-driven runs decide
+  on one quantile at a time (`SPEC.md` §6a); optimizing over the full
+  quantile distribution is separate future work.
 - **Real activation-data ingestion.** `alpha_pos`/`alpha_neg`/activation
   price are placeholders (see above), not pulled from
   Netztransparenz.de/ENTSO-E.
 - **Degradation modelling.** No cycle-aging or calendar-aging cost in the
   objective.
-- **Intraday or real-time re-optimization.** This is a day-ahead,
-  perfect-foresight batch optimizer, not a rolling/receding-horizon
-  real-time controller.
+- **Intraday or real-time re-optimization.** This is a day-ahead batch
+  optimizer, not a rolling/receding-horizon real-time controller.
+
+**A risk worth restating:** `seasonal_naive` skips 2 extra days
+(2026-03-29, 2026-04-05 — a DST day and its one-week echo) that every
+other model solves cleanly, so raw revenue totals across models are
+**not** directly comparable — any comparison must intersect day sets
+first (the Forecast Error Cost page does this; `run_rolling`/benchmarks
+totals do not, by design, since summing is the caller's job).
 
 ## Known limitation
 

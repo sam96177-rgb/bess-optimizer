@@ -8,7 +8,9 @@ from src.data.forecast_loader import (
     DayPrices,
     SkipRecord,
     load_day_prices,
+    load_forecast_run_ids,
     load_price_range,
+    load_raw_y_pred,
     load_raw_y_true,
 )
 
@@ -69,6 +71,59 @@ def test_a_normal_march_day_loads_with_expected_shapes():
     assert not result.fcr.isna().any()
     assert not result.afrr_pos.isna().any()
     assert not result.afrr_neg.isna().any()
+
+
+# ---- load_raw_y_pred, against the real sibling repo (read-only) ---------
+
+def test_load_raw_y_pred_filters_to_one_model_and_quantile():
+    raw = load_raw_y_pred(PATHS, "lgbm_point", 0.5)
+    assert set(raw.index.get_level_values("market").unique()) == {
+        "day_ahead", "fcr", "afrr_pos", "afrr_neg"
+    }
+    # (market, target_time) unique for this model+quantile (Verified facts).
+    assert not raw.index.duplicated().any()
+    assert not raw.empty
+
+
+def test_load_raw_y_pred_raises_on_unknown_model():
+    with pytest.raises(ValueError, match="Unknown forecast model"):
+        load_raw_y_pred(PATHS, "not_a_real_model", 0.5)
+
+
+def test_load_raw_y_pred_raises_for_quantile_absent_from_point_model():
+    # lgbm_point only ever produces the median (q=0.5) -- Verified facts.
+    with pytest.raises(ValueError, match="no rows at quantile"):
+        load_raw_y_pred(PATHS, "lgbm_point", 0.05)
+
+
+def test_load_raw_y_pred_preserves_nan_rows_for_seasonal_naive_dst_days():
+    """seasonal_naive's 'same block last week' lookup lands on an
+    irregular day for 2026-03-29 (DST) and its one-week echo 2026-04-05 --
+    exactly 10 NaN y_pred rows in each of the three capacity markets
+    (Verified facts). load_raw_y_pred must keep them, not drop them, so
+    load_day_prices can skip those days with a legible reason.
+    """
+    raw = load_raw_y_pred(PATHS, "seasonal_naive", 0.5)
+    nan_rows = raw[raw.isna()]
+    assert len(nan_rows) == 30
+    assert dict(nan_rows.index.get_level_values("market").value_counts()) == {
+        "fcr": 10, "afrr_pos": 10, "afrr_neg": 10,
+    }
+    nan_dates = {pd.Timestamp(t).date() for t in nan_rows.index.get_level_values("target_time")}
+    assert nan_dates == {dt.date(2026, 3, 29), dt.date(2026, 4, 5)}
+
+
+def test_load_forecast_run_ids_returns_one_id_per_market():
+    run_ids = load_forecast_run_ids(PATHS, "lgbm_point")
+    assert set(run_ids.keys()) == {"day_ahead", "fcr", "afrr_pos", "afrr_neg"}
+    assert all(isinstance(v, str) and v for v in run_ids.values())
+    # Each (market, model) pair is its own parquet file (Verified facts).
+    assert len(set(run_ids.values())) == 4
+
+
+def test_load_forecast_run_ids_raises_on_unknown_model():
+    with pytest.raises(ValueError, match="Unknown forecast model"):
+        load_forecast_run_ids(PATHS, "not_a_real_model")
 
 
 # ---- synthetic edge cases (isolated from real data) ----------------------
