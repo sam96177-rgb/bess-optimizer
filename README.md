@@ -179,16 +179,17 @@ these are measurements.**
 
 | Assumption | Current value | Why it's assumed | Real replacement |
 |---|---|---|---|
-| `alpha_pos`, `alpha_neg` (aFRR activation rate) | 0.05, 0.05 — **unconfirmed placeholder**, SPEC.md gave no default | Real activation is stochastic and unknown ahead of time; the deterministic MILP needs a point estimate | Activation volumes published on Netztransparenz.de, aggregated to an empirical rate per block/season |
-| `activation_energy_price_eur_mwh` | 100.0 — **unconfirmed placeholder** | This repo has no activation-price feed; regelleistung.net is capacity-only | aFRR energy activation prices from the ENTSO-E Transparency Platform (not regelleistung.net) |
+| `alpha_pos`, `alpha_neg` (aFRR activation rate) | 0.05, 0.05 — **unconfirmed placeholder**, SPEC.md gave no default | Real activation is stochastic and unknown ahead of time; the deterministic MILP needs a point estimate | Real activation *volumes* are on neither ENTSO-E (rejected by its API) nor regelleistung.net (only bid stacks); Netztransparenz.de is the untested candidate. Aggregate to an empirical rate per block/season |
+| `activation_energy_price_eur_mwh` | 100.0 — **unconfirmed placeholder** | This repo has no activation-price feed; regelleistung.net is capacity-only | aFRR activated-energy prices from the ENTSO-E Transparency Platform: 15-min Up/Down for DE, 2026-03-21..09-17, ~81-84% of quarter-hours present (probed, not ingested) |
 | `fcr_hours` (FCR reserve duration) | 0.5 | Prequalification energy-headroom rule, given as a SPEC.md default but **not verified against current German regulation** | BNetzA / regelleistung.net prequalification documentation |
 | `afrr_hours` (aFRR reserve duration) | 1.0 | Same as above | Same as above |
 
 **This matters a lot in practice.** In the full 164-day backtest
-(2026-03-21 to 2026-08-31), the co-optimized strategy's total revenue was
-€193,424 — but **30.7% of that (€59,391) is the assumed activation
-term**, and the two aFRR capacity markets it enables (€99,392 combined)
-dwarf actual day-ahead arbitrage (€34,071). Before using this repo's
+(2026-03-21 to 2026-08-31, v2 battery, perfect foresight), the
+co-optimized strategy's gross revenue was €658,902 — but **20.7% of that
+(€136,518) is the assumed activation term**, and the two aFRR capacity
+markets it enables (€446,224 combined) dwarf actual day-ahead arbitrage
+(€60,845). Before using this repo's
 output for anything beyond validating the optimizer's own logic, replace
 `alpha_pos`/`alpha_neg`/`activation_energy_price_eur_mwh` with real
 figures — the headline number is currently mostly an assumption, not a
@@ -213,34 +214,63 @@ since that repo is read-only from this one.
 
 ---
 
-## Results: 164-day backtest (2026-03-21 → 2026-08-31)
+## Results: 164-day backtest (2026-03-21 -> 2026-08-31), v2 battery
 
-```
---- day_ahead_only ---
-  days solved: 164  |  days skipped: 0
-  total revenue: EUR 56386.41
-  cycles/day: 2.36  avg SOC utilisation: 100.0%
+10 MWh / 4.5 MW, 90% round trip, 50 kW aux load, EUR 8/MWh degradation
+(the earlier 1 MW / 2 MWh v1 figures are superseded). Solved days are
+2026-03-21 to 2026-08-31 (164; the forecast results run that far for every
+model); `seasonal_naive` has 2 fewer (no forecast for 2026-03-29 and
+2026-04-05), so it is compared with perfect foresight on its own 162 days.
 
---- naive ---
-  days solved: 164  |  days skipped: 0
-  total revenue: EUR 39537.82
-  cycles/day: 0.81  avg SOC utilisation: 100.0%
+**Perfect foresight** (decide and settle on realized prices), EUR:
 
---- full_cooptimized ---
-  days solved: 164  |  days skipped: 0
-  total revenue: EUR 193424.47
-    split -> day_ahead: 34070.71  fcr: 570.87  afrr_pos: 25671.23  afrr_neg: 73720.96  activation: 59390.70
-  cycles/day: 0.65  avg SOC utilisation: 30.8%
-  !! 30.7% of total revenue comes from the ASSUMED activation term.
-```
+| Strategy | Gross | Degradation | Net | Cycles/day |
+|---|---|---|---|---|
+| `day_ahead_only` | 229,586 | 34,093 | 195,493 | 1.46 |
+| `full_cooptimized` | 658,902 | 6,127 | 652,775 | 0.28 |
 
-Reproduce with `python -m src.cli --start-date 2026-03-21 --end-date 2026-08-31`.
+`full_cooptimized` gross by market: aFRR- 316,840 - activation 136,518
+(20.7% of gross, **assumed**) - aFRR+ 129,384 - day-ahead 60,845 - FCR
+15,315. So ~91% of the revenue is reserve capacity plus the assumed
+activation term; the day-ahead leg is ~9%.
 
-Worth noting: the co-optimized run cycles the battery *less* (0.65/day
-vs 2.36 for pure arbitrage) and uses less of its SOC range (31% vs 100%)
-— it's trading cycling for holding capacity, which the numbers say pays
-off, but that trade-off is exactly where the activation and reserve-
-duration assumptions bite hardest.
+**Forecast-driven** (decide on the q0.5 forecast, settle on realized),
+net EUR and share of perfect foresight on the same days:
+
+| Model | `day_ahead_only` | capture | `full_cooptimized` | capture |
+|---|---|---|---|---|
+| `seasonal_naive` (162 d) | 157,439 | 81.4% | 613,225 | 95.0% |
+| `lgbm_point` | 110,834 | 56.7% | 610,960 | 93.6% |
+| `lgbm_quantile_tuned` | 114,256 | 58.4% | 592,148 | 90.7% |
+| `lgbm_quantile` | 129,834 | 66.4% | 585,461 | 89.7% |
+| `linear_lags` | 127,014 | 65.0% | 516,384 | 79.1% |
+
+What this says (`scripts/da_leg_diagnosis.py` reproduces the day-ahead part):
+
+- **The weakest forecaster by MAE wins on decision value.** `seasonal_naive`
+  has the best capture in both strategies. Day-ahead arbitrage rewards
+  hitting the price *spikes*, not the average level: over 164 days the
+  regression models trade more volume (2.2-2.8 GWh vs 1.9 for perfect
+  foresight) at a realized buy/sell margin of ~73-83 EUR/MWh (perfect:
+  130; `seasonal_naive`: 111), because MAE-trained forecasts shrink toward
+  the mean. `linear_lags` also has a -37 EUR/MWh level bias.
+- **Day-ahead leg inside `full_cooptimized`:** positive for 4 of 5 models
+  (`linear_lags` ~0) but it captures only 13-51% of the perfect-foresight
+  day-ahead leg, against 57-81% in pure arbitrage -- reserves take the
+  battery, leaving only the spike hours, which are exactly what forecasts
+  miss. (A 4-day smoke sample earlier showed a *negative* day-ahead
+  capture; that was small-sample noise.)
+- **Where the money is lost** in `full_cooptimized` (gap to perfect,
+  EUR): the day-ahead leg costs every model 30-61k, and aFRR- costs
+  `linear_lags` 53k, `lgbm_quantile` 28k and `lgbm_quantile_tuned` 25k.
+  Per-market capture can exceed 100% (the markets share one battery), so
+  read the per-market gaps together, and only net capture is bounded.
+- The activation term is an assumption (alpha 0.05, EUR 100/MWh), so
+  every `full_cooptimized` figure above is partly assumption-driven.
+
+Reproduce: `python -m src.batch --start-date 2026-03-21 --end-date
+2026-09-17 --strategies day_ahead_only full_cooptimized`. `naive` was not
+re-run on the v2 battery over the full window.
 
 ---
 
