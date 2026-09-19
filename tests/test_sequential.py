@@ -210,10 +210,10 @@ def test_proxy_rejected_for_realized_runs(tmp_path):
 
 # ---- batch matrix -----------------------------------------------------------
 
-def test_batch_matrix_has_no_perfect_foresight_run_for_full_sequential():
+def test_batch_matrix_has_a_perfect_foresight_run_for_full_sequential():
     combos = build_matrix(["m1", "m2"], [0.5], ["full_cooptimized", "full_sequential"], include_perfect_foresight=True)
     assert ("full_cooptimized", "realized", None, None) in combos
-    assert ("full_sequential", "realized", None, None) not in combos
+    assert ("full_sequential", "realized", None, None) in combos
     assert ("full_sequential", "forecast", "m1", 0.5) in combos
     assert ("full_sequential", "forecast", "m2", 0.5) in combos
 
@@ -235,7 +235,7 @@ def test_run_rolling_sequential_end_to_end_on_real_data(tmp_path):
         price_basis=PRICE_BASIS, day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"],
         paths_config=paths, decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
     )
-    result = run_rolling(da_proxy_model="seasonal_naive", **kwargs)
+    result = run_rolling(sequential=True, da_proxy_model="seasonal_naive", **kwargs)
     assert result.da_proxy_model == "seasonal_naive"
     assert len(result.daily_revenue) == 1
     row = result.daily_revenue.iloc[0]
@@ -258,5 +258,52 @@ def test_da_proxy_requires_ancillary_markets():
             start_date=NORMAL_DAY, end_date=NORMAL_DAY, battery=BATTERY, solver_config=SOLVER,
             day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"], include_ancillary=False,
             decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
+            sequential=True,
+        )
+
+
+def test_da_proxy_requires_sequential_flag():
+    from dispatch_helpers import TIMINGS
+    from src.model.rolling import run_rolling
+
+    with pytest.raises(ValueError, match="only applies to sequential"):
+        run_rolling(
+            start_date=NORMAL_DAY, end_date=NORMAL_DAY, battery=BATTERY, solver_config=SOLVER,
+            assumptions=ASSUMPTIONS, price_basis=PRICE_BASIS,
+            day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"],
+            decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
             da_proxy_model="seasonal_naive",
         )
+
+
+def _real_kwargs(day):
+    from dispatch_helpers import TIMINGS
+    from src.config import load_paths_config
+
+    return dict(
+        start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER, assumptions=ASSUMPTIONS,
+        price_basis=PRICE_BASIS, day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"],
+        paths_config=load_paths_config(),
+    )
+
+
+def test_perfect_foresight_sequential_matches_full_cooptimized_on_real_prices():
+    """Every stage sees the real prices, so gate ordering costs nothing."""
+    from src.model.rolling import run_rolling
+
+    kwargs = _real_kwargs(dt.date(2026, 6, 15))
+    sim = run_rolling(**kwargs)
+    seq = run_rolling(sequential=True, **kwargs)
+    assert seq.daily_revenue["net"].iloc[0] == pytest.approx(sim.daily_revenue["net"].iloc[0], rel=1e-3)
+
+
+def test_forecast_sequential_with_same_model_at_every_stage_matches_simultaneous():
+    from src.model.rolling import run_rolling
+
+    kwargs = _real_kwargs(dt.date(2026, 6, 15)) | dict(
+        decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
+    )
+    sim = run_rolling(**kwargs)
+    seq = run_rolling(sequential=True, **kwargs)
+    assert seq.da_proxy_model is None
+    assert seq.daily_revenue["net"].iloc[0] == pytest.approx(sim.daily_revenue["net"].iloc[0], rel=1e-3)

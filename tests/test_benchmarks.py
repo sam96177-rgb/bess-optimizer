@@ -95,10 +95,14 @@ def test_full_cooptimized_never_earns_less_than_day_ahead_only_per_day():
     assert merged["total_full"].sum() > merged["total_da_only"].sum()
 
 
-def test_run_all_benchmarks_returns_three_strategies():
+def test_run_all_benchmarks_returns_all_four_strategies():
     results = run_all_benchmarks(
         START, START, BATTERY, SOLVER, ASSUMPTIONS, PRICE_BASIS, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS
     )
-    assert set(results.keys()) == {"day_ahead_only", "naive", "full_cooptimized"}
+    assert set(results.keys()) == {"day_ahead_only", "naive", "full_cooptimized", "full_sequential"}
     for name, result in results.items():
         assert len(result.daily_revenue) == 1, name
+    # Perfect foresight: every sequential stage sees the real prices.
+    assert results["full_sequential"].daily_revenue["net"].iloc[0] == pytest.approx(
+        results["full_cooptimized"].daily_revenue["net"].iloc[0], rel=1e-3
+    )

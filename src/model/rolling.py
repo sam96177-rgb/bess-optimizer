@@ -163,6 +163,7 @@ def run_rolling(
     forecast_model: str | None = None,
     forecast_quantile: float | None = None,
     da_proxy_model: str | None = None,
+    sequential: bool = False,
 ) -> RollingRunResult:
     """The MILP-based strategies (SPEC.md Milestone 5's main run, and
     Milestone 6's day-ahead-only benchmark) share this loop. Set
@@ -177,8 +178,10 @@ def run_rolling(
     """
     if include_ancillary and (assumptions is None or price_basis is None):
         raise ValueError("assumptions and price_basis are required when include_ancillary=True")
-    if da_proxy_model is not None and not include_ancillary:
-        raise ValueError("da_proxy_model (sequential clearing) requires include_ancillary=True")
+    if sequential and not include_ancillary:
+        raise ValueError("sequential clearing requires include_ancillary=True")
+    if da_proxy_model is not None and not sequential:
+        raise ValueError("da_proxy_model only applies to sequential clearing")
 
     pairs, skip_log = load_price_pair_range(
         start_date, end_date, day_ahead_timing, capacity_timing, paths_config,
@@ -204,7 +207,12 @@ def run_rolling(
         )
 
     def _reserve_stage_da(pair: DayPricePair) -> pd.Series | None:
-        return pair.reserve_stage_decision.day_ahead if pair.reserve_stage_decision is not None else None
+        # Sequential runs always stage the solve. With no proxy model the
+        # reserve stages see the same day-ahead prices as the final stage.
+        if not sequential:
+            return None
+        view = pair.reserve_stage_decision if pair.reserve_stage_decision is not None else pair.decision
+        return view.day_ahead
 
     if cyclic_soc:
         # Each day is fully independent (no SOC carried across the

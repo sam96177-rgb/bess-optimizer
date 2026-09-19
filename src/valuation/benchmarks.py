@@ -100,7 +100,7 @@ def run_full_cooptimized_benchmark(
     )
 
 
-DEFAULT_DA_PROXY_MODEL = "seasonal_naive"
+STRICT_DA_PROXY_MODEL = "seasonal_naive"
 
 
 def run_full_sequential_benchmark(
@@ -115,16 +115,19 @@ def run_full_sequential_benchmark(
     cyclic_soc: bool = True,
     enforce_exclusivity: bool = True,
     paths_config: PathsConfig | None = None,
+    decision_source: str = "realized",
     forecast_model: str | None = None,
     forecast_quantile: float | None = None,
-    da_proxy_model: str = DEFAULT_DA_PROXY_MODEL,
+    da_proxy_model: str | None = None,
 ) -> RollingRunResult:
-    """Gate-ordered clearing (FCR -> aFRR -> DA); forecast-driven only,
-    because with perfect foresight every stage sees the same prices and the
-    result would be identical to full_cooptimized. See src/model/sequential.py.
+    """Gate-ordered clearing (FCR -> aFRR -> DA); see src/model/sequential.py.
+
+    da_proxy_model=None: every stage sees the same prices. da_proxy_model=X
+    (forecast runs only): the FCR/aFRR stages see model X's day-ahead
+    forecast instead -- STRICT_DA_PROXY_MODEL is the worst-case choice.
+    With realized prices (perfect foresight) every stage sees the real
+    prices, which by construction reproduces full_cooptimized.
     """
-    if forecast_model is None or forecast_quantile is None:
-        raise ValueError("full_sequential is forecast-driven only: forecast_model and forecast_quantile are required")
     return run_rolling(
         start_date=start_date,
         end_date=end_date,
@@ -138,10 +141,11 @@ def run_full_sequential_benchmark(
         enforce_exclusivity=enforce_exclusivity,
         include_ancillary=True,
         paths_config=paths_config,
-        decision_source="forecast",
+        decision_source=decision_source,
         forecast_model=forecast_model,
         forecast_quantile=forecast_quantile,
         da_proxy_model=da_proxy_model,
+        sequential=True,
     )
 
 
@@ -299,10 +303,9 @@ def run_all_benchmarks(
             decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         ),
     }
-    if decision_source == "forecast":
-        strategies["full_sequential"] = run_full_sequential_benchmark(
-            start_date, end_date, battery, solver_config, assumptions, price_basis,
-            day_ahead_timing, capacity_timing, paths_config=paths_config,
-            forecast_model=forecast_model, forecast_quantile=forecast_quantile,
-        )
+    strategies["full_sequential"] = run_full_sequential_benchmark(
+        start_date, end_date, battery, solver_config, assumptions, price_basis,
+        day_ahead_timing, capacity_timing, paths_config=paths_config,
+        decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+    )
     return strategies

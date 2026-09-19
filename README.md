@@ -300,27 +300,35 @@ disk (same battery/solver/assumptions config), unless `--force`.
 
 ## Sequential clearing (`full_sequential`)
 
-The real D-1 order is FCR (~08:00) -> aFRR (~09:00) -> day-ahead (12:00),
-so reserves are committed *before* the day-ahead forecast (cutoff 11:00)
-exists. `full_cooptimized` ignores that and decides everything at once.
-`full_sequential` (`src/model/sequential.py`) solves three times per day
-and commits one market per stage: the FCR and aFRR stages see the
-day-ahead forecast of `seasonal_naive` (a 168h-lag model, available at
-that time) in place of the chosen model's; the day-ahead stage then
-re-optimizes dispatch around the fixed reserves using the chosen model.
+The real D-1 order is FCR (~08:00) -> aFRR (~09:00) -> day-ahead (12:00).
+`full_cooptimized` decides everything at once; `full_sequential`
+(`src/model/sequential.py`) solves three times per day and commits one
+market per stage (FCR, then aFRR with FCR fixed, then day-ahead dispatch
+with all reserves fixed), each settled at realized prices as usual.
 
-- It is **forecast-driven only**. With identical prices at every stage the
-  staged solves reproduce the simultaneous optimum exactly, so a
-  perfect-foresight sequential run would just duplicate `full_cooptimized`.
-  The batch therefore skips it.
-- Both models are compared on their *decision-side* objective as a hard
-  guarantee (sequential <= simultaneous). After settlement at realized
-  prices the two are within forecast noise of each other and either can
-  come out ahead.
-- Because `seasonal_naive` has no prediction for 2026-03-29 and
-  2026-04-05, every sequential run skips those 2 days.
-- Reserve capacity is assumed fully awarded at the realized clearing price
-  (price-taker), as in the other strategies; aFRR is really pay-as-bid.
+**What the FCR/aFRR stages see for day-ahead prices** is the only thing
+that can make it differ from `full_cooptimized`:
+
+- **Default: the run's own model at every stage.** All five day-ahead
+  models use only calendar, weather *forecasts*, `lag_168h` and
+  `lag_672h` (`lag_24h` is dropped as unavailable), so a forecast made
+  at 08:00 would be nearly identical to the 11:00-cutoff one; the only
+  possible difference is the weather-forecast vintage. Result: gate
+  ordering costs essentially nothing (14 days, 2026-06-15..28: within
+  0.02% of `full_cooptimized` for every model).
+- **`--sequential-da-proxy seasonal_naive`: the strict, worst-case
+  variant.** The early stages see only a 168h-lag forecast. Over the same
+  14 days this cost 0.8-2.3% for the LightGBM models (and, being noise
+  against a weak DA forecast, gained 1.6% for `linear_lags`).
+- **Perfect foresight** (`full_sequential | realized`): every stage sees
+  the real prices, which reproduces `full_cooptimized | realized` -- kept
+  as its own run so the dashboard has a matching comparator.
+
+Caveats: scored on the solver's own (decision-side) prices, a less
+informed sequential plan can never beat the simultaneous one; after
+settlement at *realized* prices either can come out ahead, since forecasts
+are wrong. Reserve capacity is assumed fully awarded at the realized
+clearing price (price-taker); aFRR is really pay-as-bid.
 
 ---
 

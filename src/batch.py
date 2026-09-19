@@ -22,6 +22,8 @@ import sys
 import traceback
 from pathlib import Path
 
+import pandas as pd
+
 from src.config import (
     REPO_ROOT,
     AssumptionsConfig,
@@ -41,7 +43,6 @@ from src.model.rolling import RollingRunResult, write_rolling_run_results
 from src.results_catalogue import scan_runs
 from src.valuation.benchmarks import (
     run_day_ahead_only_benchmark,
-    DEFAULT_DA_PROXY_MODEL,
     run_full_cooptimized_benchmark,
     run_full_sequential_benchmark,
     run_naive_benchmark,
@@ -52,8 +53,7 @@ DEFAULT_END_DATE = dt.date(2026, 8, 31)
 DEFAULT_MODELS = ["seasonal_naive", "linear_lags", "lgbm_point", "lgbm_quantile", "lgbm_quantile_tuned"]
 DEFAULT_QUANTILES = [0.5]
 ALL_STRATEGIES = ["day_ahead_only", "naive", "full_cooptimized", "full_sequential"]
-# Forecast-driven only: with perfect foresight every stage sees identical prices.
-FORECAST_ONLY_STRATEGIES = {"full_sequential"}
+
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 
 
@@ -70,6 +70,7 @@ def _run_strategy(
     decision_source: str,
     forecast_model: str | None,
     forecast_quantile: float | None,
+    sequential_da_proxy: str | None = None,
 ) -> RollingRunResult:
     kwargs = dict(
         decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
@@ -93,7 +94,7 @@ def _run_strategy(
         return run_full_sequential_benchmark(
             start_date, end_date, battery, solver, assumptions, price_basis,
             timings["day_ahead"], timings["fcr"], paths_config=paths,
-            forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+            da_proxy_model=sequential_da_proxy if decision_source == "forecast" else None, **kwargs,
         )
     raise ValueError(f"Unknown strategy '{strategy}'. Must be one of {ALL_STRATEGIES}")
 
@@ -135,6 +136,7 @@ def _already_solved(
     start_date: dt.date,
     end_date: dt.date,
     fingerprint: dict,
+    da_proxy_model: str | None = None,
 ) -> bool:
     if catalogue.empty:
         return False
@@ -156,10 +158,15 @@ def _already_solved(
         return False
 
     if strategy == "full_sequential":
-        fingerprint = {**fingerprint, "da_proxy_model": DEFAULT_DA_PROXY_MODEL}
+        fingerprint = {**fingerprint, "da_proxy_model": da_proxy_model if decision_source == "forecast" else None}
+
+    def _matches(row, key, value) -> bool:
+        # A None expectation means "no proxy": the sidecar stores null, which
+        # the catalogue frame surfaces as NaN.
+        return pd.isna(row.get(key)) if value is None else row.get(key) == value
 
     for _, row in candidates.iterrows():
-        if all(row.get(key) == value for key, value in fingerprint.items()):
+        if all(_matches(row, key, value) for key, value in fingerprint.items()):
             return True
     return False
 
@@ -172,7 +179,7 @@ def build_matrix(
     """
     combos: list[tuple[str, str, str | None, float | None]] = []
     for strategy in strategies:
-        if include_perfect_foresight and strategy not in FORECAST_ONLY_STRATEGIES:
+        if include_perfect_foresight:
             combos.append((strategy, "realized", None, None))
         for model in models:
             for quantile in quantiles:
@@ -191,6 +198,7 @@ def run_batch(
     dry_run: bool,
     results_dir: Path = DEFAULT_RESULTS_DIR,
     paths_config: PathsConfig | None = None,
+    sequential_da_proxy: str | None = None,
 ) -> None:
     battery = battery_from_config(load_battery_config())
     solver = load_solver_config()
@@ -212,6 +220,7 @@ def run_batch(
 
         if not force and _already_solved(
             catalogue, strategy, decision_source, forecast_model, forecast_quantile, start_date, end_date, fingerprint,
+            sequential_da_proxy,
         ):
             print(f"[skip]  {label} (already solved, matching config)")
             skipped += 1
@@ -225,7 +234,7 @@ def run_batch(
         try:
             result = _run_strategy(
                 strategy, start_date, end_date, battery, solver, assumptions, price_basis, timings, paths,
-                decision_source, forecast_model, forecast_quantile,
+                decision_source, forecast_model, forecast_quantile, sequential_da_proxy,
             )
             write_rolling_run_results(
                 result, results_dir,
@@ -263,6 +272,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--include-perfect-foresight", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force", action="store_true", help="Re-solve even if a matching run already exists")
     parser.add_argument("--dry-run", action="store_true", help="Print the matrix without solving anything")
+    parser.add_argument(
+        "--sequential-da-proxy", default=None,
+        help="Model whose day-ahead forecast the FCR/aFRR stages of full_sequential see (e.g. seasonal_naive "
+             "for the strict, worst-case variant). Default: the run's own model at every stage.",
+    )
     args = parser.parse_args(argv)
 
     run_batch(
@@ -274,6 +288,7 @@ def main(argv: list[str] | None = None) -> None:
         include_perfect_foresight=args.include_perfect_foresight,
         force=args.force,
         dry_run=args.dry_run,
+        sequential_da_proxy=args.sequential_da_proxy,
     )
 
 

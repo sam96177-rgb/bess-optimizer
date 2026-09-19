@@ -21,12 +21,12 @@ FINGERPRINT = _fingerprint(BATTERY, SOLVER, ASSUMPTIONS)
 
 # ---- build_matrix: hand-verified counts -----------------------------------
 
-def test_build_matrix_default_shape_is_23_combinations():
+def test_build_matrix_default_shape_is_24_combinations():
     combos = build_matrix(DEFAULT_MODELS, DEFAULT_QUANTILES, ALL_STRATEGIES, include_perfect_foresight=True)
-    assert len(combos) == 23
+    assert len(combos) == 24
     realized = [c for c in combos if c[1] == "realized"]
     forecast = [c for c in combos if c[1] == "forecast"]
-    assert len(realized) == 3  # one per strategy except forecast-only full_sequential
+    assert len(realized) == 4  # one per strategy
     assert len(forecast) == 20  # 5 models x 1 quantile x 4 strategies
     assert all(c[2] is None and c[3] is None for c in realized)
     assert all(c[2] is not None and c[3] is not None for c in forecast)

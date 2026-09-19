@@ -210,5 +210,7 @@ capture, stage-by-stage commitments (Phase 2), twin vs planned SoC (Phase 3).
   never leaves 1.0–9.0 MWh.
 - Re-run a small batch (`python -m src.batch` over 06-15→18) and open the dashboard
   (`streamlit run app\streamlit_app.py`) in the browser to confirm new runs render.
-- Phase 2 (later): sequential ≤ simultaneous revenue on the same days (less information
-  can only cost money), and forecast-driven ≤ perfect foresight.
+- Phase 2: on the solver's own (decision-side) prices, sequential <= simultaneous is a
+  guarantee (tested). After settlement at realized prices it is NOT guaranteed -- a less
+  informed plan can win by luck. Forecast-driven <= perfect foresight holds on average
+  (14-day check: yes for every model). See README "Sequential clearing".
