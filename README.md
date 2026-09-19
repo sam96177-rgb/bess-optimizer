@@ -332,6 +332,46 @@ clearing price (price-taker); aFRR is really pay-as-bid.
 
 ---
 
+## Digital twin (`python -m src.twin`)
+
+Replays a stored run (`results/<solve_id>/`) step by step under the real
+battery physics and **random** aFRR activation, and logs where the plan
+cannot be delivered. It never re-solves.
+
+```bash
+python -m src.twin --solve-id <id> --n-draws 500 --seed 0 --plot-day 2026-06-16
+```
+
+- The planner treats activation as its *expected* energy (`alpha * c * dt`
+  every step). The twin draws each step: called upward with probability
+  `alpha_pos / m`, downward with `alpha_neg / m` (never both), and a called
+  step delivers a random fraction (Beta-distributed, mean `m`) of the
+  committed capacity. `m` = `--call-degree-mean`, default 0.25: frequent
+  small calls (`m = 1` = always the full capacity, the crudest shape). The
+  mean equals the plan's expectation for any `m`, so any deviation is
+  variance the plan could not see. `--mode expected` reproduces the plan's
+  SOC exactly (tested) -- proof both share one physics.
+- SOC is held inside the window. Planned dispatch and aux load come first;
+  activation gets the SOC room left. Undeliverable energy is logged as a
+  shortfall (`dispatch_shortfall_mwh`, `activation_shortfall_up/down_mwh`)
+  and SOC is clipped. Days are replayed independently from the plan's own
+  starting SOC.
+- Outputs next to the run: `twin_summary.parquet` (one row per day x draw),
+  `twin_paths.parquet` (step paths for the first draws), `twin_meta.json`,
+  and optionally `twin_soc_<day>.png`.
+
+**Read the numbers with this caveat.** `alpha`, the call-size mean and its
+spread are all PLACEHOLDERS, and draws are independent per step (no
+burstiness, no mean reversion by the TSO), so SOC is a random walk. On the
+2026-06-15..18 `full_cooptimized` smoke run, 30% of (day, draw) replays hit
+a limit with the default call size (47% when every call is full-capacity,
+`--call-degree-mean 1`) -- the result moves a lot with the assumed shape,
+so treat it as assumption-driven, not a finding. Calibrating the mean, call
+size and burstiness against real activation statistics is the next step.
+FCR activation energy is assumed to net to zero.
+
+---
+
 ## Dashboard
 
 ```bash
@@ -368,6 +408,8 @@ Out of scope by design — these are real follow-ups, not oversights:
   Netztransparenz.de/ENTSO-E.
 - **Cycle/calendar-aging models.** Degradation is a flat EUR/MWh
   throughput cost, not a physical aging model.
+- **Twin activation model calibrated on real data.** The twin exists, but
+  its activation draws use the placeholder alpha and a crude call shape.
 - **Intraday or real-time re-optimization.** This is a day-ahead batch
   optimizer, not a rolling/receding-horizon real-time controller.
 
