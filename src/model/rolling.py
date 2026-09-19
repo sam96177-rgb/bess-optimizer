@@ -41,6 +41,7 @@ class RollingRunResult:
     decision_source: str = "realized"
     forecast_model: str | None = None
     forecast_quantile: float | None = None
+    da_proxy_model: str | None = None  # set only for sequential-clearing runs
 
 
 def day_to_long_rows(solve_id: str, day_prices: DayPrices, result: SolveResult, e_is_assumption: bool) -> list[dict]:
@@ -104,6 +105,7 @@ def _solve_day_via_subprocess(
     enforce_exclusivity: bool,
     initial_soc_mwh: float | None,
     ancillary: AncillaryInputs | None,
+    reserve_stage_day_ahead: pd.Series | None = None,
 ) -> SolveResult:
     """Runs build_model+solve_model for exactly one day in a fresh
     subprocess (src/model/_day_solve_worker.py) instead of in this
@@ -121,6 +123,7 @@ def _solve_day_via_subprocess(
         "enforce_exclusivity": enforce_exclusivity,
         "initial_soc_mwh": initial_soc_mwh,
         "ancillary": ancillary,
+        "reserve_stage_day_ahead": reserve_stage_day_ahead,
     }
     with tempfile.TemporaryDirectory() as tmp:
         input_path = Path(tmp) / "task.pkl"
@@ -159,6 +162,7 @@ def run_rolling(
     decision_source: str = "realized",
     forecast_model: str | None = None,
     forecast_quantile: float | None = None,
+    da_proxy_model: str | None = None,
 ) -> RollingRunResult:
     """The MILP-based strategies (SPEC.md Milestone 5's main run, and
     Milestone 6's day-ahead-only benchmark) share this loop. Set
@@ -173,10 +177,13 @@ def run_rolling(
     """
     if include_ancillary and (assumptions is None or price_basis is None):
         raise ValueError("assumptions and price_basis are required when include_ancillary=True")
+    if da_proxy_model is not None and not include_ancillary:
+        raise ValueError("da_proxy_model (sequential clearing) requires include_ancillary=True")
 
     pairs, skip_log = load_price_pair_range(
         start_date, end_date, day_ahead_timing, capacity_timing, paths_config,
         decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+        da_proxy_model=da_proxy_model,
     )
 
     solve_id = str(uuid.uuid4())
@@ -196,6 +203,9 @@ def run_rolling(
             include_activation_in_soc=include_activation_in_soc,
         )
 
+    def _reserve_stage_da(pair: DayPricePair) -> pd.Series | None:
+        return pair.reserve_stage_decision.day_ahead if pair.reserve_stage_decision is not None else None
+
     if cyclic_soc:
         # Each day is fully independent (no SOC carried across the
         # boundary), so they can be solved concurrently -- each still in
@@ -204,6 +214,7 @@ def run_rolling(
         def _task(pair: DayPricePair) -> tuple[DayPricePair, SolveResult]:
             result = _solve_day_via_subprocess(
                 pair.decision, battery, solver_config, cyclic_soc, enforce_exclusivity, None, _ancillary_for(pair.decision),
+                _reserve_stage_da(pair),
             )
             return pair, result
 
@@ -218,6 +229,7 @@ def run_rolling(
             initial_soc_mwh = carried_soc_mwh if carried_soc_mwh is not None else battery.soc_min_mwh
             result = _solve_day_via_subprocess(
                 pair.decision, battery, solver_config, cyclic_soc, enforce_exclusivity, initial_soc_mwh, _ancillary_for(pair.decision),
+                _reserve_stage_da(pair),
             )
             carried_soc_mwh = float(result.e.iloc[-1])
             solved.append((pair, result))
@@ -243,6 +255,7 @@ def run_rolling(
     return RollingRunResult(
         solve_id=solve_id, long_format=long_format, daily_revenue=daily_revenue, skip_log=skip_log,
         decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+        da_proxy_model=da_proxy_model,
     )
 
 
@@ -313,6 +326,7 @@ def build_run_meta(
         "decision_source": result.decision_source,
         "forecast_model": result.forecast_model,
         "forecast_quantile": result.forecast_quantile,
+        "da_proxy_model": result.da_proxy_model,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "n_days_solved": len(result.daily_revenue),

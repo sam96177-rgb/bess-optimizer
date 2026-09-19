@@ -41,7 +41,9 @@ from src.model.rolling import RollingRunResult, write_rolling_run_results
 from src.results_catalogue import scan_runs
 from src.valuation.benchmarks import (
     run_day_ahead_only_benchmark,
+    DEFAULT_DA_PROXY_MODEL,
     run_full_cooptimized_benchmark,
+    run_full_sequential_benchmark,
     run_naive_benchmark,
 )
 
@@ -49,7 +51,9 @@ DEFAULT_START_DATE = dt.date(2026, 3, 21)
 DEFAULT_END_DATE = dt.date(2026, 8, 31)
 DEFAULT_MODELS = ["seasonal_naive", "linear_lags", "lgbm_point", "lgbm_quantile", "lgbm_quantile_tuned"]
 DEFAULT_QUANTILES = [0.5]
-ALL_STRATEGIES = ["day_ahead_only", "naive", "full_cooptimized"]
+ALL_STRATEGIES = ["day_ahead_only", "naive", "full_cooptimized", "full_sequential"]
+# Forecast-driven only: with perfect foresight every stage sees identical prices.
+FORECAST_ONLY_STRATEGIES = {"full_sequential"}
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 
 
@@ -84,6 +88,12 @@ def _run_strategy(
         return run_full_cooptimized_benchmark(
             start_date, end_date, battery, solver, assumptions, price_basis,
             timings["day_ahead"], timings["fcr"], paths_config=paths, **kwargs,
+        )
+    if strategy == "full_sequential":
+        return run_full_sequential_benchmark(
+            start_date, end_date, battery, solver, assumptions, price_basis,
+            timings["day_ahead"], timings["fcr"], paths_config=paths,
+            forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         )
     raise ValueError(f"Unknown strategy '{strategy}'. Must be one of {ALL_STRATEGIES}")
 
@@ -145,6 +155,9 @@ def _already_solved(
     if candidates.empty:
         return False
 
+    if strategy == "full_sequential":
+        fingerprint = {**fingerprint, "da_proxy_model": DEFAULT_DA_PROXY_MODEL}
+
     for _, row in candidates.iterrows():
         if all(row.get(key) == value for key, value in fingerprint.items()):
             return True
@@ -159,7 +172,7 @@ def build_matrix(
     """
     combos: list[tuple[str, str, str | None, float | None]] = []
     for strategy in strategies:
-        if include_perfect_foresight:
+        if include_perfect_foresight and strategy not in FORECAST_ONLY_STRATEGIES:
             combos.append((strategy, "realized", None, None))
         for model in models:
             for quantile in quantiles:

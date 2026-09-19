@@ -15,6 +15,7 @@ DayPricePair below.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import logging
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ from src.config import _REQUIRED_MARKETS, MarketTimingConfig, PathsConfig, load_
 from src.data.grid import DayGrid, build_day_grid
 
 logger = logging.getLogger(__name__)
+
+DA_PROXY_QUANTILE = 0.5
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,10 @@ class DayPricePair:
     day: dt.date
     decision: DayPrices
     settlement: DayPrices
+    # Sequential clearing only: what the FCR and aFRR stages (which close
+    # before the day-ahead forecast exists) are allowed to see -- the
+    # decision prices with day_ahead swapped for an earlier-available proxy.
+    reserve_stage_decision: DayPrices | None = None
 
 
 @dataclass(frozen=True)
@@ -256,8 +263,13 @@ def load_price_pair_range(
     decision_source: str = "realized",
     forecast_model: str | None = None,
     forecast_quantile: float | None = None,
+    da_proxy_model: str | None = None,
 ) -> tuple[list[DayPricePair], list[SkipRecord]]:
     """Decision and settlement prices for each day in the range.
+
+    da_proxy_model (forecast runs only): also build `reserve_stage_decision`
+    for each day, using that model's day-ahead y_pred (at DA_PROXY_QUANTILE)
+    in place of forecast_model's. See DayPricePair.
 
     decision_source="realized" is the perfect-foresight case: both sides
     are the same y_true prices. decision_source="forecast" builds the
@@ -276,6 +288,8 @@ def load_price_pair_range(
         raise ValueError(f"decision_source must be 'realized' or 'forecast', got '{decision_source}'")
     if decision_source == "forecast" and (forecast_model is None or forecast_quantile is None):
         raise ValueError("forecast_model and forecast_quantile are required when decision_source='forecast'")
+    if da_proxy_model is not None and decision_source != "forecast":
+        raise ValueError("da_proxy_model only applies to forecast-driven runs (a realized run has no stage asymmetry)")
 
     paths_config = paths_config or load_paths_config()
     raw_true = load_raw_y_true(paths_config)
@@ -284,6 +298,7 @@ def load_price_pair_range(
         if decision_source == "forecast"
         else raw_true
     )
+    raw_proxy = load_raw_y_pred(paths_config, da_proxy_model, DA_PROXY_QUANTILE) if da_proxy_model else None
 
     pairs: list[DayPricePair] = []
     skipped: list[SkipRecord] = []
@@ -309,7 +324,22 @@ def load_price_pair_range(
                 day += dt.timedelta(days=1)
                 continue
 
-        pairs.append(DayPricePair(day=day, decision=decision, settlement=settlement))
+        reserve_stage = None
+        if raw_proxy is not None:
+            proxy_da = _extract_day_ahead(raw_proxy, decision.grid)
+            if proxy_da is None:
+                record = SkipRecord(
+                    day, f"reserve-stage DA proxy ({da_proxy_model}): day_ahead missing or NaN for one or more steps",
+                )
+                logger.warning("Skipping %s: %s", record.day, record.reason)
+                skipped.append(record)
+                day += dt.timedelta(days=1)
+                continue
+            reserve_stage = dataclasses.replace(decision, day_ahead=proxy_da)
+
+        pairs.append(
+            DayPricePair(day=day, decision=decision, settlement=settlement, reserve_stage_decision=reserve_stage)
+        )
         day += dt.timedelta(days=1)
 
     return pairs, skipped

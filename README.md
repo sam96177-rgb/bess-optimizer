@@ -298,6 +298,32 @@ disk (same battery/solver/assumptions config), unless `--force`.
 
 ---
 
+## Sequential clearing (`full_sequential`)
+
+The real D-1 order is FCR (~08:00) -> aFRR (~09:00) -> day-ahead (12:00),
+so reserves are committed *before* the day-ahead forecast (cutoff 11:00)
+exists. `full_cooptimized` ignores that and decides everything at once.
+`full_sequential` (`src/model/sequential.py`) solves three times per day
+and commits one market per stage: the FCR and aFRR stages see the
+day-ahead forecast of `seasonal_naive` (a 168h-lag model, available at
+that time) in place of the chosen model's; the day-ahead stage then
+re-optimizes dispatch around the fixed reserves using the chosen model.
+
+- It is **forecast-driven only**. With identical prices at every stage the
+  staged solves reproduce the simultaneous optimum exactly, so a
+  perfect-foresight sequential run would just duplicate `full_cooptimized`.
+  The batch therefore skips it.
+- Both models are compared on their *decision-side* objective as a hard
+  guarantee (sequential <= simultaneous). After settlement at realized
+  prices the two are within forecast noise of each other and either can
+  come out ahead.
+- Because `seasonal_naive` has no prediction for 2026-03-29 and
+  2026-04-05, every sequential run skips those 2 days.
+- Reserve capacity is assumed fully awarded at the realized clearing price
+  (price-taker), as in the other strategies; aFRR is really pay-as-bid.
+
+---
+
 ## Dashboard
 
 ```bash
@@ -332,8 +358,8 @@ Out of scope by design — these are real follow-ups, not oversights:
 - **Real activation-data ingestion.** `alpha_pos`/`alpha_neg`/activation
   price are placeholders (see above), not pulled from
   Netztransparenz.de/ENTSO-E.
-- **Degradation modelling.** No cycle-aging or calendar-aging cost in the
-  objective.
+- **Cycle/calendar-aging models.** Degradation is a flat EUR/MWh
+  throughput cost, not a physical aging model.
 - **Intraday or real-time re-optimization.** This is a day-ahead batch
   optimizer, not a rolling/receding-horizon real-time controller.
 
@@ -346,9 +372,10 @@ totals do not, by design, since summing is the caller's job).
 
 ## Known limitation
 
-`grid.py`'s block-boundary logic doesn't handle a DST **fall-back**
-(25-hour) day — it would raise a clear `ValueError` rather than silently
-mis-assigning steps to blocks (`map_steps_to_blocks`). This never occurs
-in the current data window (which ends before Germany's autumn 2026
-transition), so it was left unhandled and loud rather than built and
-untested.
+DST **fall-back** (25-hour) days: the 6 nominal 4h capacity blocks end an
+hour before such a day's local end, so `build_day_grid` assigns the
+trailing hour's steps to the last block (`extend_last_block_over_long_day`).
+This is an **unverified assumption**: no real fall-back-day data exists
+yet (data ends 2026-09-17; the day is 2026-10-25), so how regelleistung
+actually cuts that day is not confirmed. Check it against real data once
+2026-10-25 is published.

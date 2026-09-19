@@ -24,6 +24,7 @@ Milestone 5's rolling multi-day chaining).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import linopy
@@ -60,7 +61,18 @@ class AncillaryInputs:
                 raise ValueError(f"{name} contains NaN — a block with a missing price must be excluded upstream, not fed in")
 
 
+@dataclass(frozen=True)
+class FixedReserves:
+    """Reserve commitments already made at an earlier gate. Any field left
+    None stays a free decision variable. Each Series is indexed by block."""
+
+    fcr: pd.Series | None = None
+    pos: pd.Series | None = None
+    neg: pd.Series | None = None
+
+
 FCR_CAP_FRACTION_OF_PMAX = 0.8  # C4
+RESERVE_FIX_RESOLUTION = 1e-6  # committed MW are floored to this grid so a fixed value never sits above its own constraints
 
 
 def build_model(
@@ -72,7 +84,10 @@ def build_model(
     enforce_exclusivity: bool = True,
     initial_soc_mwh: float | None = None,
     ancillary: AncillaryInputs | None = None,
+    fixed_reserves: FixedReserves | None = None,
 ) -> linopy.Model:
+    if fixed_reserves is not None and ancillary is None:
+        raise ValueError("fixed_reserves requires ancillary inputs")
     if day_ahead_prices.isna().any():
         raise ValueError("day_ahead_prices contains NaN — the caller must have already skipped this day")
     if not day_ahead_prices.index.equals(steps):
@@ -137,6 +152,14 @@ def build_model(
                 e.sel(step=block_steps) <= battery.soc_max_mwh - reserve_high,
                 name=f"soc_reserve_high_block{block.index}",
             )
+    if fixed_reserves is not None:
+        for var, committed in ((c_fcr, fixed_reserves.fcr), (c_pos, fixed_reserves.pos), (c_neg, fixed_reserves.neg)):
+            if committed is None:
+                continue
+            for block in ancillary.blocks:
+                value = math.floor(float(committed.loc[block.index]) / RESERVE_FIX_RESOLUTION) * RESERVE_FIX_RESOLUTION
+                m.add_constraints(var.sel(block=block.index) == max(value, 0.0), name=f"fixed_{var.name}_block{block.index}")
+
     # C7 (block alignment) needs no explicit constraint: c_fcr/c_pos/c_neg
     # are single variables per block, structurally constant across all of
     # that block's steps.

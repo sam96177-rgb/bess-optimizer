@@ -100,6 +100,51 @@ def run_full_cooptimized_benchmark(
     )
 
 
+DEFAULT_DA_PROXY_MODEL = "seasonal_naive"
+
+
+def run_full_sequential_benchmark(
+    start_date: dt.date,
+    end_date: dt.date,
+    battery: Battery,
+    solver_config: SolverConfig,
+    assumptions: AssumptionsConfig,
+    price_basis: MarketPriceBasisConfig,
+    day_ahead_timing: MarketTimingConfig,
+    capacity_timing: MarketTimingConfig,
+    cyclic_soc: bool = True,
+    enforce_exclusivity: bool = True,
+    paths_config: PathsConfig | None = None,
+    forecast_model: str | None = None,
+    forecast_quantile: float | None = None,
+    da_proxy_model: str = DEFAULT_DA_PROXY_MODEL,
+) -> RollingRunResult:
+    """Gate-ordered clearing (FCR -> aFRR -> DA); forecast-driven only,
+    because with perfect foresight every stage sees the same prices and the
+    result would be identical to full_cooptimized. See src/model/sequential.py.
+    """
+    if forecast_model is None or forecast_quantile is None:
+        raise ValueError("full_sequential is forecast-driven only: forecast_model and forecast_quantile are required")
+    return run_rolling(
+        start_date=start_date,
+        end_date=end_date,
+        battery=battery,
+        solver_config=solver_config,
+        assumptions=assumptions,
+        price_basis=price_basis,
+        day_ahead_timing=day_ahead_timing,
+        capacity_timing=capacity_timing,
+        cyclic_soc=cyclic_soc,
+        enforce_exclusivity=enforce_exclusivity,
+        include_ancillary=True,
+        paths_config=paths_config,
+        decision_source="forecast",
+        forecast_model=forecast_model,
+        forecast_quantile=forecast_quantile,
+        da_proxy_model=da_proxy_model,
+    )
+
+
 def _cheapest_and_priciest_blocks(day_prices: DayPrices) -> tuple[int, int]:
     """'Block' here reuses this repo's existing 4-hour capacity-block
     structure (grid.py), rather than inventing a second, differently-sized
@@ -239,7 +284,7 @@ def run_all_benchmarks(
     forecast_model: str | None = None,
     forecast_quantile: float | None = None,
 ) -> dict[str, RollingRunResult]:
-    return {
+    strategies = {
         "day_ahead_only": run_day_ahead_only_benchmark(
             start_date, end_date, battery, solver_config, day_ahead_timing, capacity_timing, paths_config=paths_config,
             decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
@@ -254,3 +299,10 @@ def run_all_benchmarks(
             decision_source=decision_source, forecast_model=forecast_model, forecast_quantile=forecast_quantile,
         ),
     }
+    if decision_source == "forecast":
+        strategies["full_sequential"] = run_full_sequential_benchmark(
+            start_date, end_date, battery, solver_config, assumptions, price_basis,
+            day_ahead_timing, capacity_timing, paths_config=paths_config,
+            forecast_model=forecast_model, forecast_quantile=forecast_quantile,
+        )
+    return strategies
