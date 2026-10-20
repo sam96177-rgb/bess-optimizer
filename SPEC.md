@@ -98,7 +98,7 @@ separate piece of work — do not build it now.
 | Time grid | 15-minute unified grid, Δt = 0.25 h, consistent with `resample.py` |
 | Price input | `y_true` from the forecast repo's `results/*.parquet` |
 | Markets | All four, co-optimized |
-| Battery | v1: 1 MW / 2 MWh, 88% RTE, SOC 5–95%, no degradation cost. **v2 (PLAN_V2_DISPATCH.md Phase 1): 10 MWh / 5 MW x 0.9 derating, 90% RTE, SOC 10–90%, 50 kW aux load, EUR 8/MWh degradation** — see `config/battery.yaml` |
+| Battery | 10 MWh / 5 MW nominal x 0.9 derating = 4.5 MW operational, 90% RTE, SOC 10–90%, 50 kW aux load, EUR 8/MWh degradation, no total reserve cap since v8 (each direction keeps its own power band, FCR counts 1.25 x) — see `config/battery.yaml`. (The original v1 1 MW / 2 MWh test battery is retired.) |
 | aFRR energy activation | Modelled via an **assumed** activation rate (see below) |
 | Scope of v1 | Parquet output + CLI summary. **No Streamlit dashboard** — that is a later session |
 | Repo | New repo, `git init`, sibling to `bess-market-forecast` |
@@ -133,8 +133,8 @@ block; energy decisions vary per step.
 
 | Variable | Domain | Meaning |
 |---|---|---|
-| `p_ch[t]` | ≥ 0, MW | Day-ahead charging power |
-| `p_dis[t]` | ≥ 0, MW | Day-ahead discharging power |
+| `p_ch[t]` | [0, P_max], MW | Day-ahead charging power (hard upper bound, independent of C3/C5) |
+| `p_dis[t]` | [0, P_max], MW | Day-ahead discharging power (hard upper bound, independent of C3/C5) |
 | `u[t]` | binary | 1 = charging mode, 0 = discharging mode |
 | `e[t]` | MWh | State of charge at end of step t |
 | `c_fcr[b]` | ≥ 0, MW | FCR capacity committed (symmetric) |
@@ -167,14 +167,41 @@ e[t] ≤ SOC_max·E_max − (c_fcr[b]·T_fcr + c_neg[b]·T_afrr)
 four markets draw on one power rating, per direction:
 
 ```
-p_ch[t]  + c_fcr[b] + c_neg[b] ≤ P_max
-p_dis[t] + c_fcr[b] + c_pos[b] ≤ P_max
+p_ch[t]  + 1.25 · c_fcr[b] + c_neg[b] ≤ P_max      (1.25: plan v8)
+p_dis[t] + 1.25 · c_fcr[b] + c_pos[b] ≤ P_max
 ```
 
 FCR appears in **both** because it is symmetric — it must be able to deliver in
 either direction, so it reserves headroom on both sides simultaneously.
 
 **C4 — FCR cap.** `c_fcr[b] ≤ 0.8 · P_max`.
+
+**C8 — Total reserve power limit (plan v3; removed in plan v8).** The German TSOs' rules do not
+cap `c_fcr + c_pos + c_neg`; each direction keeps its own power band. C3 now counts FCR as
+1.25 x `c_fcr` (prequalification conditions v1.05, 5 July 2024, eq. 3.9), and `c_pos` / `c_neg`
+have the operational rating as upper bound, which also bounds a block with no steps in the
+day's grid (DST) that C2/C3 skip.
+
+**C9 — Reserve bid granularity (added in plan v4).** regelleistung.net's FCR/aFRR
+tendering requires a 1 MW minimum bid and 1 MW increment: on a 5 MW battery, reserve
+bids may only be 0, 1, 2, 3, 4 or 5 MW, not any fraction between. `c_fcr[b]`, `c_pos[b]`
+and `c_neg[b]` are each constrained to be an integer multiple of
+`bid_granularity_mw` (`config/market_prices.yaml`, `1.0` for `fcr`/`afrr_pos`/`afrr_neg`,
+`0` — unconstrained — for `day_ahead`, since EPEX's 0.1 MW/0.1 EUR·MWh⁻¹ granularity is a
+rounding detail on this battery and its true value is unverified, see README):
+
+```
+c_fcr[b] = bid_granularity_mw(fcr) · n_fcr[b],      n_fcr[b] ∈ ℤ≥0
+c_pos[b] = bid_granularity_mw(afrr_pos) · n_pos[b], n_pos[b] ∈ ℤ≥0
+c_neg[b] = bid_granularity_mw(afrr_neg) · n_neg[b], n_neg[b] ∈ ℤ≥0
+```
+
+`granularity_mw = 0` reproduces the pre-v4 unconstrained (fractional-MW) behaviour, and
+is skipped entirely for a market whose reserve was already fixed by an earlier gate
+(`full_sequential`'s staged commitments) rather than fighting that fixed value. C4 and
+C8 still apply on top of the resulting integer grid. Measured cost: ~1.12x single-day
+solve time (18 extra integer variables per day on top of 96 binaries), well under the 2x
+stop threshold set before running the batch.
 
 **C5 — Charge/discharge exclusivity.**
 
@@ -330,9 +357,11 @@ skip log with reasons, not vanish silently.
 
 Implement in `benchmarks.py`:
 1. **Day-ahead-only perfect foresight** — arbitrage with no ancillary markets.
-2. **Naive rule-based** — charge during the cheapest block, discharge during
-   the most expensive, no ancillary.
-3. **Full co-optimized perfect foresight** — the main run.
+2. **Full co-optimized perfect foresight** — the main run.
+
+(A naive rule-based benchmark — charge in the cheapest block, discharge in the
+most expensive — was implemented originally and removed in plan v3: it bypassed the
+MILP's physics, so it was not a like-for-like comparison.)
 
 CLI prints: total revenue per strategy, revenue split by market, cycles per
 day, average SOC utilisation, and the assumptions banner. Report how much of

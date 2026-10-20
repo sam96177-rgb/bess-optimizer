@@ -3,7 +3,12 @@
 > **Handoff for a fresh Claude Code session (PowerShell).** Self-contained.
 > Run everything with this repo's venv: `.venv\Scripts\python.exe`.
 >
-> **Status (2026-09-19):** approved, nothing executed yet. Phase 0 has NOT
+> **Status (2026-09-20): DONE** — phases 1-3 (battery physics v2, sequential
+> clearing, digital twin, dashboard v2) are implemented; see `PLAN_V3_REVISION.md`
+> for the follow-on changes. The status text below is the original hand-off,
+> kept for context.
+>
+> *Original status (2026-09-19):* approved, nothing executed yet. Phase 0 has NOT
 > been run — tests not re-run, nothing committed.
 >
 > **Scope for this session: Phase 0 + Phase 1 only.** Stop after Phase 1 and
