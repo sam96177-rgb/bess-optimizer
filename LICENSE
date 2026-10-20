@@ -1,0 +1,27 @@
+Copyright (c) 2026 Hsiang-Yu Hung. All rights reserved.
+
+VIEW-ONLY LICENCE
+
+This repository (the source code, documentation, figures and results, together "the Work")
+is published so that it can be read and evaluated, for example by prospective employers and
+reviewers of the author's work.
+
+You MAY, free of charge:
+  1. view and read the Work;
+  2. download it and run it on your own computer, unchanged, to evaluate it.
+
+You may NOT, without the author's prior written permission:
+  1. modify the Work or create works based on it;
+  2. copy, publish, distribute, sublicense or sell the Work or any part of it, outside the
+     viewing and forking that GitHub's Terms of Service allow on github.com;
+  3. use the Work or any part of it in another project, product or service, commercial or
+     not.
+
+The Work is provided "as is", without warranty of any kind. The author is not liable for any
+claim, damage or other liability arising from the Work or its use. The forecasts are research
+results, not trading advice.
+
+Data used by the Work (ENTSO-E Transparency Platform, regelleistung.net, Open-Meteo) remains
+subject to the terms of its providers.
+
+For permission requests, contact the author through GitHub: https://github.com/sam96177-rgb

@@ -5,3 +5,5 @@ __pycache__/
 .claude/
 results/*
 !results/.gitkeep
+logs/
+results_archive/
