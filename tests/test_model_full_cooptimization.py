@@ -2,27 +2,14 @@ import datetime as dt
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from src.config import (
-    load_assumptions_config,
-    load_battery_config,
-    load_market_price_basis_config,
-    load_market_timing_configs,
-    load_solver_config,
-)
 from src.data.grid import build_day_grid
-from src.model.battery import battery_from_config
 from src.model.build import AncillaryInputs, build_model
 from src.model.solve import solve_model
+from tests.dispatch_helpers import ASSUMPTIONS, BATTERY, PRICE_BASIS, SOLVER, TIMINGS
 
 TOL = 1e-4
 
-BATTERY = battery_from_config(load_battery_config())
-SOLVER = load_solver_config()
-ASSUMPTIONS = load_assumptions_config()
-PRICE_BASIS = load_market_price_basis_config()
-TIMINGS = load_market_timing_configs()
 
 DAY = dt.date(2026, 6, 1)  # ordinary day, no DST nearby
 GRID = build_day_grid(DAY, TIMINGS["day_ahead"], TIMINGS["fcr"])
@@ -163,11 +150,14 @@ def test_raising_fcr_price_does_not_decrease_committed_capacity():
 
 
 def test_raising_afrr_pos_price_does_not_decrease_committed_capacity():
-    flat_day_ahead = pd.Series(80.0, index=GRID.steps)
+    # A spiky day-ahead makes trading compete for the battery's power. On a flat day the assumed
+    # aFRR activation income alone already fills the 4 MW band at any capacity price (V8-2:
+    # no total reserve cap), so a price rise would have nothing left to add.
+    spiky_day_ahead = pd.Series(np.random.default_rng(5).uniform(-100, 900, len(GRID.steps)), index=GRID.steps)
     zero = _block_prices(0.0)
 
-    low_price_result = _build_and_solve(flat_day_ahead, zero, _block_prices(1.0), zero)
-    high_price_result = _build_and_solve(flat_day_ahead, zero, _block_prices(200.0), zero)
+    low_price_result = _build_and_solve(spiky_day_ahead, zero, _block_prices(1.0), zero)
+    high_price_result = _build_and_solve(spiky_day_ahead, zero, _block_prices(200.0), zero)
 
     assert high_price_result.c_pos.sum() >= low_price_result.c_pos.sum() - TOL
     assert high_price_result.c_pos.sum() > low_price_result.c_pos.sum()

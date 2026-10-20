@@ -38,3 +38,38 @@ def scan_runs(results_dir) -> pd.DataFrame:
         with meta_path.open("r", encoding="utf-8") as f:
             metas.append(json.load(f))
     return pd.json_normalize(metas)
+
+
+SKIP_LOG_COLUMNS = ["solve_id", "strategy", "decision_source", "forecast_model", "day", "reason"]
+
+
+def scan_skip_logs(results_dir) -> pd.DataFrame:
+    """Every run's skipped days in one frame, labelled with the run that
+    skipped them (solve_id, strategy, decision_source, forecast_model).
+    A run with no skipped days contributes no rows. A run written before
+    skip_log.csv had a header row may leave a column-less empty file; that
+    counts as no skipped days, same as the dashboard's loader.
+    """
+    runs = scan_runs(results_dir)
+    if runs.empty:
+        return pd.DataFrame(columns=SKIP_LOG_COLUMNS)
+
+    frames = []
+    for run in runs.itertuples():
+        path = Path(results_dir) / run.solve_id / "skip_log.csv"
+        if not path.exists():
+            continue
+        try:
+            skipped = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            continue
+        if skipped.empty:
+            continue
+        skipped.insert(0, "forecast_model", run.forecast_model)
+        skipped.insert(0, "decision_source", run.decision_source)
+        skipped.insert(0, "strategy", run.strategy)
+        skipped.insert(0, "solve_id", run.solve_id)
+        frames.append(skipped)
+    if not frames:
+        return pd.DataFrame(columns=SKIP_LOG_COLUMNS)
+    return pd.concat(frames, ignore_index=True)[SKIP_LOG_COLUMNS]

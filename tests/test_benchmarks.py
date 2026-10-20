@@ -2,39 +2,25 @@ import datetime as dt
 
 import pytest
 
-from src.config import (
-    load_assumptions_config,
-    load_battery_config,
-    load_market_price_basis_config,
-    load_market_timing_configs,
-    load_paths_config,
-    load_solver_config,
-)
-from src.model.battery import battery_from_config
+from src.config import load_paths_config
 from src.model.build import build_model
 from src.model.solve import solve_model
-from src.valuation.benchmarks import (
-    _cheapest_and_priciest_blocks,
-    run_all_benchmarks,
-    run_day_ahead_only_benchmark,
-    run_full_cooptimized_benchmark,
-    run_naive_benchmark,
-)
+from src.valuation.benchmarks import STRATEGY_FLAGS, run_all_benchmarks, run_strategy
 from src.data.forecast_loader import load_day_prices, load_raw_y_true
+from tests.dispatch_helpers import ASSUMPTIONS, BATTERY, PRICE_BASIS, SOLVER, TIMINGS
 
 PATHS = load_paths_config()
-TIMINGS = load_market_timing_configs(PATHS)
-BATTERY = battery_from_config(load_battery_config())
-SOLVER = load_solver_config()
-ASSUMPTIONS = load_assumptions_config()
-PRICE_BASIS = load_market_price_basis_config()
 
 START = dt.date(2026, 6, 15)
 END = dt.date(2026, 6, 17)
+RUN = dict(
+    battery=BATTERY, solver_config=SOLVER, assumptions=ASSUMPTIONS, price_basis=PRICE_BASIS,
+    day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"], paths_config=PATHS,
+)
 
 
 def test_day_ahead_only_benchmark_matches_manual_build_model():
-    result = run_day_ahead_only_benchmark(START, START, BATTERY, SOLVER, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS)
+    result = run_strategy("day_ahead_only", start_date=START, end_date=START, **RUN)
     raw = load_raw_y_true(PATHS)
     day_prices = load_day_prices(START, raw, TIMINGS["day_ahead"], TIMINGS["fcr"])
     model = build_model(
@@ -47,46 +33,14 @@ def test_day_ahead_only_benchmark_matches_manual_build_model():
     assert result.daily_revenue["activation"].iloc[0] == 0.0
 
 
-def test_naive_benchmark_charges_only_cheapest_block_discharges_only_priciest():
-    result = run_naive_benchmark(START, START, BATTERY, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS)
-    raw = load_raw_y_true(PATHS)
-    day_prices = load_day_prices(START, raw, TIMINGS["day_ahead"], TIMINGS["fcr"])
-    cheapest, priciest = _cheapest_and_priciest_blocks(day_prices)
-
-    lf = result.long_format
-    p_ch = lf[lf["variable"] == "p_ch"].set_index("target_time")["value"]
-    p_dis = lf[lf["variable"] == "p_dis"].set_index("target_time")["value"]
-
-    for step, block_idx in zip(day_prices.grid.steps, day_prices.grid.step_block_index):
-        if block_idx != cheapest:
-            assert p_ch.loc[step] == 0.0
-        if block_idx != priciest:
-            assert p_dis.loc[step] == 0.0
-
-    e_vals = lf[lf["variable"] == "e"]["value"]
-    assert (e_vals >= BATTERY.soc_min_mwh - 1e-6).all()
-    assert (e_vals <= BATTERY.soc_max_mwh + 1e-6).all()
-
-
-def test_naive_benchmark_never_charges_and_discharges_same_step():
-    result = run_naive_benchmark(START, END, BATTERY, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS)
-    lf = result.long_format
-    p_ch = lf[lf["variable"] == "p_ch"].set_index(["solve_date", "target_time"])["value"]
-    p_dis = lf[lf["variable"] == "p_dis"].set_index(["solve_date", "target_time"])["value"]
-    both = (p_ch > 1e-9) & (p_dis > 1e-9)
-    assert not both.any()
-
-
 def test_full_cooptimized_never_earns_less_than_day_ahead_only_per_day():
     """The day-ahead-only solution (zero ancillary commitment) is always
     feasible inside the full co-optimized model, so its optimum can never
     be worse -- a real correctness check on the joint MILP, not just a
     plausibility assumption.
     """
-    day_ahead_only = run_day_ahead_only_benchmark(START, END, BATTERY, SOLVER, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS)
-    full = run_full_cooptimized_benchmark(
-        START, END, BATTERY, SOLVER, ASSUMPTIONS, PRICE_BASIS, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS
-    )
+    day_ahead_only = run_strategy("day_ahead_only", start_date=START, end_date=END, **RUN)
+    full = run_strategy("full_cooptimized", start_date=START, end_date=END, **RUN)
 
     merged = day_ahead_only.daily_revenue.merge(
         full.daily_revenue, on="solve_date", suffixes=("_da_only", "_full")
@@ -95,14 +49,22 @@ def test_full_cooptimized_never_earns_less_than_day_ahead_only_per_day():
     assert merged["total_full"].sum() > merged["total_da_only"].sum()
 
 
-def test_run_all_benchmarks_returns_all_four_strategies():
-    results = run_all_benchmarks(
-        START, START, BATTERY, SOLVER, ASSUMPTIONS, PRICE_BASIS, TIMINGS["day_ahead"], TIMINGS["fcr"], paths_config=PATHS
-    )
-    assert set(results.keys()) == {"day_ahead_only", "naive", "full_cooptimized", "full_sequential"}
+def test_run_all_benchmarks_defaults_exclude_full_sequential():
+    results = run_all_benchmarks(start_date=START, end_date=START, **RUN)
+    assert set(results) == {"day_ahead_only", "full_cooptimized"}
+
+
+def test_run_all_benchmarks_can_run_every_strategy():
+    results = run_all_benchmarks(list(STRATEGY_FLAGS), start_date=START, end_date=START, **RUN)
+    assert set(results) == set(STRATEGY_FLAGS)
     for name, result in results.items():
         assert len(result.daily_revenue) == 1, name
     # Perfect foresight: every sequential stage sees the real prices.
     assert results["full_sequential"].daily_revenue["net"].iloc[0] == pytest.approx(
         results["full_cooptimized"].daily_revenue["net"].iloc[0], rel=1e-3
     )
+
+
+def test_run_strategy_rejects_unknown_name():
+    with pytest.raises(ValueError, match="Unknown strategy 'naive'"):
+        run_strategy("naive", start_date=START, end_date=START, **RUN)

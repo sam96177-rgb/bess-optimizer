@@ -66,6 +66,7 @@ def solve_case(
     battery=BATTERY,
     with_ancillary: bool = True,
     include_activation_in_soc: bool = True,
+    price_basis=PRICE_BASIS,
     **build_kwargs,
 ) -> Case:
     ancillary = None
@@ -77,7 +78,7 @@ def solve_case(
             fcr_prices=zero if fcr is None else fcr,
             afrr_pos_prices=zero if afrr_pos is None else afrr_pos,
             afrr_neg_prices=zero if afrr_neg is None else afrr_neg,
-            price_basis=PRICE_BASIS,
+            price_basis=price_basis,
             assumptions=ASSUMPTIONS,
             include_activation_in_soc=include_activation_in_soc,
         )

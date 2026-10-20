@@ -2,8 +2,8 @@
 step of that block -- including on DST days whose step count is not 96."""
 import pytest
 
-from dispatch_helpers import (
-    BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, grid_for, random_ancillary_case,
+from tests.dispatch_helpers import (
+    BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, random_ancillary_case,
 )
 
 TOL = 1e-6

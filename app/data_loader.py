@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 # `streamlit run app/streamlit_app.py` puts app/ on sys.path, not the repo
 # root -- add the root so `src.*` imports resolve regardless of cwd.
@@ -20,22 +21,28 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.config import MarketTimingConfig, load_market_timing_configs, load_paths_config  # noqa: E402
+from src.data.forecast_loader import MEDIAN_QUANTILE, resolve_per_market_models  # noqa: E402
 from src.results_catalogue import scan_runs  # noqa: E402
 
 RESULTS_DIR = _REPO_ROOT / "results"
+MODEL_INFO_PATH = Path(__file__).resolve().parent / "model_info.yaml"
 
-# The plan's chosen fan widths: 90% interval (0.05/0.95) and 50% interval
-# (0.25/0.75), plus the median -- only rendered where the model actually
-# produced that quantile (point models only have q=0.5).
-FAN_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+# Strategies no dashboard page shows. Old runs of them may still be on disk
+# (they stay in results/ and in scripts/export_runs.py's CSV); the pages just
+# never offer them. full_sequential is still runnable via `src.batch --strategies`.
+HIDDEN_STRATEGIES = frozenset({"naive", "full_sequential"})
 
 
 @st.cache_data
 def load_run_catalogue() -> pd.DataFrame:
     """One row per completed run (results/<solve_id>/run_meta.json), the
-    single discovery path shared with the CLI and batch.py.
+    single discovery path shared with the CLI and batch.py, minus the
+    strategies the dashboard hides.
     """
-    return scan_runs(RESULTS_DIR)
+    catalogue = scan_runs(RESULTS_DIR)
+    if catalogue.empty:
+        return catalogue
+    return catalogue[~catalogue["strategy"].isin(HIDDEN_STRATEGIES)].reset_index(drop=True)
 
 
 @st.cache_data
@@ -60,21 +67,6 @@ def load_daily_revenue(solve_id: str) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_skip_log(solve_id: str) -> pd.DataFrame:
-    path = RESULTS_DIR / solve_id / "skip_log.csv"
-    if not path.exists():
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except pd.errors.EmptyDataError:
-        # A run written before rolling.py started giving skip_log.csv an
-        # explicit header row leaves a column-less empty file when nothing
-        # was skipped -- pd.read_csv can't parse that; treat it the same
-        # as "no skipped days" rather than erroring the page.
-        return pd.DataFrame(columns=["day", "reason"])
-
-
-@st.cache_data
 def pivot_long_format(long_format: pd.DataFrame) -> pd.DataFrame:
     """One row per target_time, one column per `variable` (SPEC.md
     long-format schema: solve_id, solve_date, target_time, block_id,
@@ -95,44 +87,34 @@ def pivot_long_format(long_format: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_forecast_prices(model: str) -> pd.DataFrame:
-    """Day-ahead y_pred quantile fan (columns q_<level>) plus y_true for
-    `model`, indexed by target_time. Reads the sibling repo's
-    results/*.parquet directly (read-only, SPEC.md Hard Rule 3) rather
-    than through src.data.forecast_loader.load_raw_y_pred, which only
-    returns one (model, quantile) slice at a time -- not enough to draw a
-    fan across every quantile a model produced.
+def load_median_forecasts() -> pd.DataFrame:
+    """Every model's median forecast and the realized price, long format:
+    market, model, target_time, y_pred, y_true. Reads the sibling repo's
+    results/*.parquet directly (read-only, SPEC.md Hard Rule 3), with no
+    import from that repo. Empty if there are no result files.
     """
     paths = load_paths_config()
     files = sorted(paths.results_dir.glob("*.parquet"))
     columns = ["market", "model", "quantile", "target_time", "y_pred", "y_true"]
     frames = [pd.read_parquet(f, columns=columns) for f in files]
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["market", "model", "target_time", "y_pred", "y_true"])
     full = pd.concat(frames, ignore_index=True)
+    median = full[full["quantile"] == MEDIAN_QUANTILE].drop(columns="quantile")
+    median["target_time"] = pd.to_datetime(median["target_time"])
+    return median.reset_index(drop=True)
 
-    subset = full[(full["market"] == "day_ahead") & (full["model"] == model)]
+
+def load_forecast_prices(model: str, market: str = "day_ahead") -> pd.DataFrame:
+    """`market`'s median forecast (`forecast`) and realized price (`y_true`)
+    for `model`, indexed by target_time. A blend name (per_market_best) uses
+    the real model it assigns to `market`."""
+    median = load_median_forecasts()
+    subset = median[(median["market"] == market) & (median["model"] == resolve_per_market_models(model)[market])]
     if subset.empty:
         return pd.DataFrame()
-
-    fan = subset.pivot_table(index="target_time", columns="quantile", values="y_pred")
-    fan = fan.rename(columns={q: f"q_{q}" for q in fan.columns})
-    fan.columns.name = None
-    fan["y_true"] = subset.drop_duplicates("target_time").set_index("target_time")["y_true"]
-    fan.index = pd.to_datetime(fan.index)
-    return fan.sort_index()
-
-
-@st.cache_data
-def available_forecast_models() -> list[str]:
-    paths = load_paths_config()
-    files = sorted(paths.results_dir.glob("*.parquet"))
-    if not files:
-        return []
-    models: set[str] = set()
-    for f in files:
-        models.update(pd.read_parquet(f, columns=["model"])["model"].unique())
-    return sorted(models)
+    out = subset.drop_duplicates("target_time").set_index("target_time")[["y_pred", "y_true"]]
+    return out.rename(columns={"y_pred": "forecast"}).sort_index()
 
 
 @st.cache_data
@@ -145,12 +127,12 @@ def matching_runs(
     strategy: str,
     decision_source: str,
     forecast_model: str | None = None,
-    forecast_quantile: float | None = None,
 ) -> pd.DataFrame:
-    """Catalogue rows for one (strategy, decision_source, forecast_model,
-    forecast_quantile) combination, newest first -- there can be more than
-    one if the same combination was solved over different date windows
-    (e.g. a smoke test alongside the full batch run).
+    """Catalogue rows for one (strategy, decision_source, forecast_model)
+    combination, newest first -- there can be more than one if the same
+    combination was solved over different date windows (e.g. a smoke test
+    alongside the full batch run). Forecast runs are always the median:
+    it is the only quantile ever solved.
     """
     if catalogue.empty:
         return catalogue
@@ -159,48 +141,32 @@ def matching_runs(
         mask &= catalogue["forecast_model"].isna()
     else:
         mask &= catalogue["forecast_model"] == forecast_model
-    if forecast_quantile is None:
-        mask &= catalogue["forecast_quantile"].isna()
-    else:
-        mask &= catalogue["forecast_quantile"] == forecast_quantile
+    if decision_source == "forecast":
+        mask &= catalogue["forecast_quantile"] == MEDIAN_QUANTILE
     return catalogue[mask].sort_values("created_at", ascending=False)
 
 
-def filter_proxy(runs: pd.DataFrame, label: str) -> pd.DataFrame:
-    """Keep the runs whose reserve-stage day-ahead view matches `label` (see
-    analysis.proxy_label). Runs written before the column existed count as
-    'same model at every stage'."""
-    from analysis import proxy_label
-
-    if runs.empty:
-        return runs
-    proxies = runs["da_proxy_model"] if "da_proxy_model" in runs.columns else pd.Series(None, index=runs.index, dtype=object)
-    return runs[proxies.map(proxy_label) == label]
-
-
-def twin_mtime(solve_id: str) -> float | None:
-    """Modification time of a run's twin_meta.json (written last), or None if the
-    run has no twin output. Passed to the cached loaders so re-running the twin
-    invalidates them."""
-    path = RESULTS_DIR / solve_id / "twin_meta.json"
-    return path.stat().st_mtime if path.exists() else None
+@st.cache_data
+def load_forecast_run_meta(run_id: str) -> dict:
+    """One forecast backtest's own run JSON (sibling repo's results/<run_id>.json
+    -- NOT this repo's results/<solve_id>/run_meta.json), for fields the
+    dashboard reads but never computes itself, e.g. first_train_days."""
+    path = load_paths_config().results_dir / f"{run_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @st.cache_data
-def load_twin_summary(solve_id: str, mtime: float) -> pd.DataFrame:
-    df = pd.read_parquet(RESULTS_DIR / solve_id / "twin_summary.parquet")
-    df["solve_date"] = pd.to_datetime(df["solve_date"]).dt.date
-    return df
+def load_lookahead_summary(study_name: str) -> dict | None:
+    """results/lookahead_<study>.json (scripts/lookahead_value.py), or None
+    if that study hasn't been run through it yet."""
+    path = RESULTS_DIR / f"lookahead_{study_name}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @st.cache_data
-def load_twin_paths(solve_id: str, mtime: float) -> pd.DataFrame:
-    df = pd.read_parquet(RESULTS_DIR / solve_id / "twin_paths.parquet")
-    df["target_time"] = pd.to_datetime(df["target_time"])
-    df["solve_date"] = pd.to_datetime(df["solve_date"]).dt.date
-    return df
-
-
-@st.cache_data
-def load_twin_meta(solve_id: str, mtime: float) -> dict:
-    return json.loads((RESULTS_DIR / solve_id / "twin_meta.json").read_text(encoding="utf-8"))
+def load_model_info() -> dict[str, dict]:
+    """PLAN_V5_1_REVISION.md section 1: one card per forecast name the
+    batch matrix can produce (app/model_info.yaml), keyed by model name."""
+    return yaml.safe_load(MODEL_INFO_PATH.read_text(encoding="utf-8"))

@@ -1,10 +1,12 @@
 """Reserve backing (C2): every step of a block keeps enough SOC room to
 deliver the committed FCR and aFRR energy -- and reserves are actually sold
 (guards against the spec's binary-gated form that forces FCR to zero)."""
+import math
+
 import pandas as pd
 import pytest
 
-from dispatch_helpers import (
+from tests.dispatch_helpers import (
     ASSUMPTIONS, BATTERY, NORMAL_DAY, PRICE_BASIS, SPRING_FORWARD_DAY, block_prices, grid_for,
     random_ancillary_case, solve_case,
 )
@@ -43,17 +45,20 @@ def test_afrr_up_is_energy_backed_not_just_fcr():
 
 def test_fcr_is_actually_sold_known_answer():
     """Flat DA (no arbitrage) and a high FCR price: the optimum is to commit
-    the full FCR cap (0.8 * 4.5 = 3.6 MW) in every block. The spec's gated
-    form (u_dis + u_ch <= 1 with reserves inside the gated constraints)
-    would force this to 0."""
+    the full FCR cap (0.8 * 4.5 = 3.6 MW) in every block, floored to the
+    nearest MW by the real 1 MW bid granularity (PLAN_V4_REVISION.md section
+    4) -> 3.0 MW. The spec's gated form (u_dis + u_ch <= 1 with reserves
+    inside the gated constraints) would force this to 0."""
     grid = grid_for(NORMAL_DAY)
     case = solve_case(grid, pd.Series(50.0, index=grid.steps), block_prices(grid, 100.0))
     cap = 0.8 * BATTERY.power_mw
-    assert (case.result.c_fcr - cap).abs().max() < 1e-4
+    granularity = PRICE_BASIS.granularity_for("fcr")
+    achieved_cap = math.floor(cap / granularity) * granularity if granularity > 0 else cap
+    assert (case.result.c_fcr - achieved_cap).abs().max() < 1e-4
     revenue = compute_revenue(
         case.result, case.day_ahead, grid.delta_t_hours, case.ancillary, battery=BATTERY,
     )
-    assert revenue.fcr == pytest.approx(cap * 100.0 * len(grid.blocks), rel=1e-6)
+    assert revenue.fcr == pytest.approx(achieved_cap * 100.0 * len(grid.blocks), rel=1e-6)
     _assert_backed(case)
 
 

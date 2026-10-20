@@ -33,15 +33,14 @@ afrr_activation:
   activation_energy_price_eur_mwh: 100.0  # PLACEHOLDER, unconfirmed
 
 reserve_energy_duration:
-  # UNVERIFIED — flagged prominently per SPEC.md §3. These are hours of
-  # energy headroom that must be held in reserve per MW of committed
-  # capacity, to satisfy prequalification rules. They materially change
-  # the result: they eat directly into usable SOC via constraint C2.
-  # SPEC.md supplies these exact default numbers but explicitly asks that
-  # they NOT be treated as settled without confirmation — they have not
-  # been checked against current German regulation.
+  # Hours of energy held per MW of committed capacity; they eat into usable
+  # SOC through constraint C2. Checked 2026-10-02 against the German TSOs'
+  # prequalification conditions (v1.05, 5 July 2024) and market description
+  # (January 2025); a newer document version has not been looked for.
   #
-  # Real replacement: current FCR/aFRR prequalification requirements
-  # (BNetzA / regelleistung.net prequalification documentation).
+  # aFRR: 60 minutes per direction (VERIFIED) -> afrr_hours 1.0.
+  # FCR: the document's example needs 0.91 MWh per MW for the symmetric product,
+  #   i.e. about 0.455 h per side; 0.5 h per side is therefore slightly
+  #   conservative (VERIFIED, rounded up).
   fcr_hours: 0.5
   afrr_hours: 1.0

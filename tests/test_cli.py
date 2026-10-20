@@ -4,11 +4,9 @@ import pandas as pd
 import pytest
 
 from src.cli import compute_operational_stats, format_assumptions_banner, main, summarize_revenue
-from src.config import load_battery_config
-from src.model.battery import battery_from_config
 from src.model.rolling import RollingRunResult
+from tests.dispatch_helpers import BATTERY
 
-BATTERY = battery_from_config(load_battery_config())
 
 
 def _fake_result() -> RollingRunResult:
@@ -86,7 +84,7 @@ def test_main_runs_end_to_end_and_prints_expected_sections(capsys):
     out = capsys.readouterr().out
     assert "ASSUMPTIONS IN EFFECT FOR THIS RUN" in out
     assert "day_ahead_only" in out
-    assert "naive" in out
+    assert "full_sequential" not in out
     assert "full_cooptimized" in out
     assert "BATTERY IN EFFECT FOR THIS RUN" in out
     assert "4.5 MW operational" in out

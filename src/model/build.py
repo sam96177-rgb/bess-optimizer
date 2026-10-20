@@ -28,6 +28,7 @@ import math
 from dataclasses import dataclass
 
 import linopy
+import numpy as np
 import pandas as pd
 
 from src.config import AssumptionsConfig, MarketPriceBasisConfig
@@ -72,7 +73,26 @@ class FixedReserves:
 
 
 FCR_CAP_FRACTION_OF_PMAX = 0.8  # C4
+# Battery power needed per MW of FCR sold: at least 1.25 x (German TSOs' FCR prequalification
+# conditions v1.05, 5 July 2024, eq. 3.9).
+FCR_POWER_FACTOR = 1.25
 RESERVE_FIX_RESOLUTION = 1e-6  # committed MW are floored to this grid so a fixed value never sits above its own constraints
+
+
+def _constrain_to_granularity(
+    m: linopy.Model, var: linopy.Variable, name: str, block_ids: list[int], upper_bound_mw: float, granularity_mw: float,
+) -> None:
+    """1 MW minimum reserve bid, 1 MW increment (regelleistung.net tendering
+    page; PLAN_V4_REVISION.md section 4): `var` must be an integer multiple
+    of granularity_mw. linopy has no native "multiple of g" bound, only
+    integer/binary, so this adds an auxiliary integer count variable and
+    ties `var` to it -- 0 stays unconstrained (v3's fractional-MW behaviour).
+    """
+    if granularity_mw <= 0:
+        return
+    n_upper = math.floor(upper_bound_mw / granularity_mw)
+    count = m.add_variables(lower=0, upper=n_upper, integer=True, coords=[block_ids], dims=["block"], name=f"n_{name}")
+    m.add_constraints(var == granularity_mw * count, name=f"granularity_{name}")
 
 
 def build_model(
@@ -100,8 +120,10 @@ def build_model(
     m = linopy.Model()
     n_steps = len(steps)
 
-    p_ch = m.add_variables(lower=0, coords=[steps], dims=["step"], name="p_ch")
-    p_dis = m.add_variables(lower=0, coords=[steps], dims=["step"], name="p_dis")
+    # Hard bounds so power stays physical even with exclusivity (C5) and
+    # ancillary (C3) both off; otherwise only the SOC band would cap it.
+    p_ch = m.add_variables(lower=0, upper=battery.power_mw, coords=[steps], dims=["step"], name="p_ch")
+    p_dis = m.add_variables(lower=0, upper=battery.power_mw, coords=[steps], dims=["step"], name="p_dis")
     u = m.add_variables(binary=True, coords=[steps], dims=["step"], name="u")
     e = m.add_variables(
         lower=battery.soc_min_mwh, upper=battery.soc_max_mwh, coords=[steps], dims=["step"], name="e"
@@ -111,12 +133,26 @@ def build_model(
     if ancillary is not None:
         n_blocks = len(ancillary.blocks)
         block_ids = [b.index for b in ancillary.blocks]
-        c_fcr = m.add_variables(
-            lower=0, upper=FCR_CAP_FRACTION_OF_PMAX * battery.power_mw,
-            coords=[block_ids], dims=["block"], name="c_fcr",
-        )
-        c_pos = m.add_variables(lower=0, coords=[block_ids], dims=["block"], name="c_pos")
-        c_neg = m.add_variables(lower=0, coords=[block_ids], dims=["block"], name="c_neg")
+        fcr_cap_mw = FCR_CAP_FRACTION_OF_PMAX * battery.power_mw
+        c_fcr = m.add_variables(lower=0, upper=fcr_cap_mw, coords=[block_ids], dims=["block"], name="c_fcr")
+        # Upper bound = the converter rating per direction; also bounds a block with no steps
+        # in the day's grid (DST), which skips C3 but still earns capacity revenue.
+        c_pos = m.add_variables(lower=0, upper=battery.power_mw, coords=[block_ids], dims=["block"], name="c_pos")
+        c_neg = m.add_variables(lower=0, upper=battery.power_mw, coords=[block_ids], dims=["block"], name="c_neg")
+        # A fixed_reserves component already pins its variable to an exact
+        # value (an earlier gate's own solve, sequential clearing) -- re-adding
+        # the granularity equality on top would fight that fix whenever the
+        # fixed value isn't itself on the grid, so it's skipped per market.
+        fixed_component = {"fcr": None, "afrr_pos": None, "afrr_neg": None}
+        if fixed_reserves is not None:
+            fixed_component = {"fcr": fixed_reserves.fcr, "afrr_pos": fixed_reserves.pos, "afrr_neg": fixed_reserves.neg}
+        for market, var, name, cap_mw in (
+            ("fcr", c_fcr, "c_fcr", fcr_cap_mw),
+            ("afrr_pos", c_pos, "c_pos", battery.power_mw),
+            ("afrr_neg", c_neg, "c_neg", battery.power_mw),
+        ):
+            if fixed_component[market] is None:
+                _constrain_to_granularity(m, var, name, block_ids, cap_mw, ancillary.price_basis.granularity_for(market))
 
     # ---- C5 — charge/discharge exclusivity ----
     if enforce_exclusivity:
@@ -128,17 +164,17 @@ def build_model(
         for block in ancillary.blocks:
             step_mask = [bi == block.index for bi in ancillary.step_block_index]
             block_steps = steps[step_mask]
-            if len(block_steps) == 0:
-                continue
             fcr_b = c_fcr.sel(block=block.index)
             pos_b = c_pos.sel(block=block.index)
             neg_b = c_neg.sel(block=block.index)
+            if len(block_steps) == 0:
+                continue
             m.add_constraints(
-                p_ch.sel(step=block_steps) + fcr_b + neg_b <= battery.power_mw,
+                p_ch.sel(step=block_steps) + FCR_POWER_FACTOR * fcr_b + neg_b <= battery.power_mw,
                 name=f"power_limit_charge_block{block.index}",
             )
             m.add_constraints(
-                p_dis.sel(step=block_steps) + fcr_b + pos_b <= battery.power_mw,
+                p_dis.sel(step=block_steps) + FCR_POWER_FACTOR * fcr_b + pos_b <= battery.power_mw,
                 name=f"power_limit_discharge_block{block.index}",
             )
             # ---- C2 — SOC bounds with reserved headroom ----
@@ -165,34 +201,42 @@ def build_model(
     # that block's steps.
 
     # ---- C1 — SOC dynamics ----
+    # prev_e[t] = e[t-1]; step 0's previous state is e[-1] (cyclic_soc) or the
+    # caller-supplied initial_soc_mwh (else). `.roll` wraps position 0 to the
+    # last variable (cyclic); `.shift` leaves position 0 unassigned (linopy's
+    # -1 "no variable" label), so adding a constant that's initial_soc_mwh at
+    # position 0 and 0 elsewhere fills it in.
+    if cyclic_soc:
+        prev_e = e.roll(step=1, roll_coords=False)
+    else:
+        initial_soc_term = np.zeros(n_steps)
+        initial_soc_term[0] = initial_soc_mwh
+        prev_e = e.shift(step=1) + initial_soc_term
+
     if ancillary is not None and ancillary.include_activation_in_soc:
         alpha_pos = ancillary.assumptions.alpha_pos
         alpha_neg = ancillary.assumptions.alpha_neg
+        # Gather each block's c_pos/c_neg onto every step in that block
+        # (repeats, since a block spans several steps), then relabel the
+        # "block" dim as "step" so it lines up with e/p_ch/p_dis positionally.
+        pos_by_step = c_pos.sel(block=ancillary.step_block_index).rename(block="step").assign_coords(step=steps)
+        neg_by_step = c_neg.sel(block=ancillary.step_block_index).rename(block="step").assign_coords(step=steps)
         # Activated aFRR energy passes through the conversion losses:
         # up-activation drains 1/eta per MWh delivered, down-activation
         # stores eta per MWh absorbed.
-        activation_by_step = [
-            (alpha_pos / battery.eta * c_pos.sel(block=bi) - alpha_neg * battery.eta * c_neg.sel(block=bi))
-            * delta_t_hours
-            for bi in ancillary.step_block_index
-        ]
+        activation = (alpha_pos / battery.eta * pos_by_step - alpha_neg * battery.eta * neg_by_step) * delta_t_hours
     else:
-        activation_by_step = None
+        activation = 0
 
-    for t in range(n_steps):
-        prev_e = e.sel(step=steps[t - 1]) if t > 0 else (
-            e.sel(step=steps[-1]) if cyclic_soc else initial_soc_mwh
-        )
-        activation_t = activation_by_step[t] if activation_by_step is not None else 0
-        expr = (
-            e.sel(step=steps[t])
-            - prev_e
-            - battery.eta * delta_t_hours * p_ch.sel(step=steps[t])
-            + (delta_t_hours / battery.eta) * p_dis.sel(step=steps[t])
-            + battery.aux_load_mw * delta_t_hours
-            + activation_t
-        )
-        m.add_constraints(expr == 0, name=f"soc_dynamics_t{t}")
+    expr = (
+        e
+        - prev_e
+        - battery.eta * delta_t_hours * p_ch
+        + (delta_t_hours / battery.eta) * p_dis
+        + battery.aux_load_mw * delta_t_hours
+        + activation
+    )
+    m.add_constraints(expr == 0, name="soc_dynamics")
 
     # ---- Objective ----
     day_ahead_term = (day_ahead_prices.reindex(steps) * (p_dis - p_ch) * delta_t_hours).sum()

@@ -3,7 +3,6 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from src.config import load_market_timing_configs
 from src.data.grid import (
     BlockBoundary,
     build_capacity_blocks,
@@ -11,8 +10,8 @@ from src.data.grid import (
     build_day_grid,
     map_steps_to_blocks,
 )
+from tests.dispatch_helpers import TIMINGS
 
-TIMINGS = load_market_timing_configs()
 DAY_AHEAD = TIMINGS["day_ahead"]
 FCR = TIMINGS["fcr"]
 

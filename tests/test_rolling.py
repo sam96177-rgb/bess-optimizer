@@ -4,30 +4,16 @@ import datetime as dt
 import pandas as pd
 import pytest
 
-from src.config import (
-    MarketTimingConfig,
-    PathsConfig,
-    load_assumptions_config,
-    load_battery_config,
-    load_market_price_basis_config,
-    load_market_timing_configs,
-    load_paths_config,
-    load_solver_config,
-)
+from src.config import MarketTimingConfig, PathsConfig, load_paths_config
 from src.data.forecast_loader import load_day_prices, load_raw_y_true
 from src.data.grid import build_day_grid
-from src.model.battery import battery_from_config
 from src.model.build import AncillaryInputs, build_model
 from src.model.rolling import LONG_FORMAT_COLUMNS, run_rolling, write_rolling_run_results
 from src.model.solve import solve_model
 from src.valuation.revenue import compute_revenue
+from tests.dispatch_helpers import ASSUMPTIONS, BATTERY, PRICE_BASIS, SOLVER, TIMINGS
 
 PATHS = load_paths_config()
-TIMINGS = load_market_timing_configs(PATHS)
-BATTERY = battery_from_config(load_battery_config())
-SOLVER = load_solver_config()
-ASSUMPTIONS = load_assumptions_config()
-PRICE_BASIS = load_market_price_basis_config()
 
 # Synthetic timing configs for the forecast-driven test below -- isolated
 # from the real sibling repo, same convention as
@@ -111,13 +97,18 @@ def test_daily_revenue_has_one_row_per_solved_day_and_matches_manual_solve():
 
 
 def test_skipped_days_appear_in_skip_log_not_silently_dropped():
-    result = _run(dt.date(2026, 3, 18), dt.date(2026, 3, 22))
+    """day_ahead's y_true (read from the forecast repo's own backtest
+    results, not the raw ENTSO-E ingest) only covers from whatever date
+    that backtest actually started -- under V6-4's validation-window
+    backtest (PLAN_V6_REVISION.md) that's 2026-01-20, not the old V5
+    test-window start of 2026-03-21."""
+    result = _run(dt.date(2026, 1, 17), dt.date(2026, 1, 21))
     assert len(result.skip_log) == 3
     assert {s.day for s in result.skip_log} == {
-        dt.date(2026, 3, 18), dt.date(2026, 3, 19), dt.date(2026, 3, 20),
+        dt.date(2026, 1, 17), dt.date(2026, 1, 18), dt.date(2026, 1, 19),
     }
     assert all("day_ahead" in s.reason for s in result.skip_log)
-    assert set(result.daily_revenue["solve_date"]) == {dt.date(2026, 3, 21), dt.date(2026, 3, 22)}
+    assert set(result.daily_revenue["solve_date"]) == {dt.date(2026, 1, 20), dt.date(2026, 1, 21)}
 
 
 def test_cyclic_soc_true_days_are_solved_independently():

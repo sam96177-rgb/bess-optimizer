@@ -1,22 +1,18 @@
 import dataclasses
-import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import load_battery_config, load_solver_config
-from src.model.battery import battery_from_config
 from src.model.build import build_model
 from src.model.solve import solve_model
 from src.valuation.revenue import compute_revenue
+from tests.dispatch_helpers import BATTERY, SOLVER
 
 TOL = 1e-4
 
-BATTERY = battery_from_config(load_battery_config())
 # Closed-form expectations below assume a lossless-of-aux, free-cycling battery.
 IDEAL_BATTERY = dataclasses.replace(BATTERY, aux_load_mw=0.0, degradation_cost_eur_mwh=0.0)
-SOLVER = load_solver_config()
 DELTA_T = 0.25
 
 STEPS = pd.date_range("2026-06-01", periods=96, freq="15min", tz="Europe/Berlin")

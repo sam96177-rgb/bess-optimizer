@@ -22,7 +22,21 @@
 # used directly against MWh dispatched — and is listed here only so every
 # market this optimizer touches has an explicit, checked basis.
 
-day_ahead: per_mwh_energy
-fcr: per_block_total
-afrr_pos: per_mw_hour
-afrr_neg: per_mw_hour
+price_basis:
+  day_ahead: per_mwh_energy
+  fcr: per_block_total
+  afrr_pos: per_mw_hour
+  afrr_neg: per_mw_hour
+
+# Reserve bid MW granularity (PLAN_V4_REVISION.md section 4): FCR and aFRR
+# tender in 1 MW minimum bids, 1 MW increments, 4-hour products, daily
+# auctions (regelleistung.net tendering page,
+# https://www.regelleistung.net/en-us/Become-a-balancing-service-provider/Tendering-and-bidding-process).
+# day_ahead's 0.1 MW / EPEX-SPOT minimum order is a rounding detail on this
+# battery's size and is UNVERIFIED (EPEX's site refuses automated fetches),
+# so it is recorded but not enforced: 0 means "no granularity constraint".
+bid_granularity_mw:
+  day_ahead: 0
+  fcr: 1.0
+  afrr_pos: 1.0
+  afrr_neg: 1.0

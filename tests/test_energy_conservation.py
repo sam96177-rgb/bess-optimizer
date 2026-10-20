@@ -2,10 +2,11 @@
 physics says (charge with eta, discharge with 1/eta, aux drain, and the
 expected aFRR activation energy pushed through the same conversion losses).
 """
+import pandas as pd
 import pytest
 
-from dispatch_helpers import (
-    ASSUMPTIONS, BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, random_ancillary_case,
+from tests.dispatch_helpers import (
+    ASSUMPTIONS, BATTERY, FALL_BACK_DAY, NORMAL_DAY, SPRING_FORWARD_DAY, grid_for, random_ancillary_case, solve_case,
 )
 
 TOL = 1e-5
@@ -54,9 +55,6 @@ def test_energy_conserved_without_activation_in_soc():
 def test_aux_load_alone_drains_soc_when_idle():
     """Hand check: a day so flat and cheap-to-hold that the battery only
     refills what aux drains -- total energy in (after eta) equals aux * 24h."""
-    from dispatch_helpers import grid_for, solve_case
-    import pandas as pd
-
     grid = grid_for(NORMAL_DAY)
     case = solve_case(grid, pd.Series(50.0, index=grid.steps), with_ancillary=False)
     stored_in = BATTERY.eta * case.result.p_ch.sum() * grid.delta_t_hours

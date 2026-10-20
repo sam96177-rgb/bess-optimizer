@@ -4,7 +4,7 @@ import dataclasses
 import pandas as pd
 import pytest
 
-from dispatch_helpers import BATTERY, NORMAL_DAY, grid_for, solve_case
+from tests.dispatch_helpers import BATTERY, NORMAL_DAY, grid_for, solve_case
 from src.model.build import terminal_value_eur_mwh
 from src.valuation.revenue import compute_revenue
 

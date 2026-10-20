@@ -15,15 +15,14 @@ perfect-foresight run on the days they share:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.analysis import forecast_shape_quality, realized_prices  # noqa: E402
 from src.config import REPO_ROOT, load_paths_config  # noqa: E402
 from src.data.forecast_loader import load_raw_y_pred, load_raw_y_true  # noqa: E402
 from src.results_catalogue import scan_runs  # noqa: E402
@@ -49,32 +48,8 @@ def _daily(results_dir: Path, solve_id: str) -> pd.DataFrame:
 
 
 def _realized_prices(results_dir: Path, solve_id: str, y_true_da: pd.Series) -> tuple[float, float]:
-    """Volume-weighted realized buy and sell price of a run's day-ahead schedule."""
     lf = pd.read_parquet(results_dir / solve_id / "long_format.parquet", columns=["variable", "target_time", "value"])
-    out = []
-    for variable in ("p_ch", "p_dis"):
-        s = lf[lf["variable"] == variable].set_index("target_time")["value"]
-        price = y_true_da.reindex(s.index)
-        out.append(float((s * price).sum() / s.sum()) if s.sum() > 1e-9 else float("nan"))
-    return out[0], out[1]
-
-
-def forecast_shape_quality(y_pred: pd.Series, y_true: pd.Series, days: list[dt.date]) -> dict[str, float]:
-    corrs, biases, peak_gaps = [], [], []
-    for day in days:
-        t = y_true[[i for i in y_true.index if i.date() == day]]
-        p = y_pred.reindex(t.index)
-        if p.isna().any() or len(t) < 8:
-            continue
-        if p.std() > 0 and t.std() > 0:
-            corrs.append(float(np.corrcoef(p - p.mean(), t - t.mean())[0, 1]))
-        biases.append(float((p - t).mean()))
-        peak_gaps.append(abs((p.values.argmax() - t.values.argmax()) * 0.25))
-    return {
-        "shape_corr": float(np.mean(corrs)) if corrs else float("nan"),
-        "bias_eur_mwh": float(np.mean(biases)) if biases else float("nan"),
-        "peak_timing_gap_h": float(np.median(peak_gaps)) if peak_gaps else float("nan"),
-    }
+    return realized_prices(lf, y_true_da)
 
 
 def main(argv=None) -> None:

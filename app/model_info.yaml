@@ -1,0 +1,81 @@
+# PLAN_V5_1_REVISION.md section 1: one dashboard-facing description per
+# forecast name the batch matrix can produce, loaded by
+# app/data_loader.py::load_model_info(). Text for the 4 current models,
+# per_market_best and perfect_foresight is lifted from the study report's
+# page 2 (https://claude.ai/artifact/UUTiDztG73g33b89BEiKWX). The three
+# models V5 dropped (PLAN_V5_REVISION.md section "Drop") keep a short card
+# so old pre-v5 runs in the catalogue still have something to show.
+
+seasonal_naive:
+  kind: "Baseline · no forecasting model"
+  summary: "Tomorrow will look exactly like the same day last week. It copies each price from 7 days earlier."
+  strength: "Copies real price spikes at their true height and time"
+  weakness: "Blind to anything that changed this week"
+  learns: "Nothing — a 7-day-old copy; the level every forecasting model is compared against (PLAN_V6_REVISION.md's value_vs_baseline_eur)"
+
+naive_level_adjusted:
+  kind: "Dropped in V6 · hybrid"
+  summary: "Kept last week's shape (where the peaks and dips fall) but shifted the whole day up or down to a predicted daily average."
+  strength: "—"
+  weakness: "—"
+  learns: "Dropped — PLAN_V6_REVISION.md keeps only seasonal_naive, linear_lags and lgbm_point"
+  dropped: true
+
+lgbm_point:
+  kind: "Trained · LightGBM"
+  summary: "Gradient-boosted decision trees that learn price patterns, including non-linear ones."
+  strength: "Captures interactions such as \"windy weekend nights\""
+  weakness: "Trained on average error, so it smooths spikes"
+  learns: "Hundreds of small decision trees"
+
+linear_lags:
+  kind: "Trained · scikit-learn"
+  summary: "A ridge regression: price = a weighted sum of recent prices, calendar effects and weather."
+  strength: "Stable, and cheap to train; with real 15-minute inputs (V7) it beats seasonal_naive on revenue capture"
+  weakness: "A straight-line model tends to flatten sharp spikes"
+  learns: "One weight per input feature"
+
+lear:
+  kind: "Trained · LASSO (Lago et al. 2021)"
+  summary: "One LASSO regression for every quarter-hour (or 4-hour block) of the day. Each sees the whole price profile of 1, 2, 3 and 7 days ago, the wind/solar forecast and the weekday, on a scale that tames price spikes (asinh)."
+  strength: "Picks only the few past prices that matter and sets the rest to zero, so it stays stable with little history"
+  weakness: "Linear, so it can still flatten sharp spikes; one model per period means each has only about a year of days to learn from"
+  learns: "A short list of non-zero weights per period of the day (the count is reported per run)"
+
+per_market_best:
+  kind: "Blend · mixes models per market"
+  summary: "Not a separate model but a per-market mix: whichever of the available models (seasonal_naive, linear_lags, lgbm_point and, from V8, lear) scored lowest MAE on that market's validation window (PLAN_V6_REVISION.md V6-4), picked separately for day-ahead, FCR, aFRR+ and aFRR-."
+  strength: "Takes each market's best validated performer"
+  weakness: "Inherits its ingredients' blind spots; can't beat the best single model in any one market"
+  learns: "Nothing itself — mixes already-trained models, chosen by pipeline/03_select_blend.py"
+
+perfect_foresight:
+  kind: "Ceiling (real prices) · not a forecast"
+  summary: "The optimizer given the real prices in advance. No one can do this; it is the ceiling every forecast-driven run is measured against. Reference only."
+  strength: "Defines 100% capture by construction"
+  weakness: "Not achievable in practice — requires tomorrow's real prices today"
+  learns: "n/a"
+
+analog_day:
+  kind: "Dropped in V5 · nearest-neighbour"
+  summary: "V4 model: found the most similar historical day by calendar and weather distance, then copied its prices."
+  strength: "—"
+  weakness: "—"
+  learns: "Dropped — never beat the naive models on revenue with V4's limited training history (PLAN_V5_REVISION.md)"
+  dropped: true
+
+naive_4w:
+  kind: "Dropped in V5 · lookup"
+  summary: "V4 model: copied the price from the same slot 4 weeks earlier (lag_672h), mirroring seasonal_naive a month out instead of a week."
+  strength: "—"
+  weakness: "—"
+  learns: "Dropped — never beat the naive models on revenue"
+  dropped: true
+
+flat_trailing_mean:
+  kind: "Dropped in V5 · flat mean"
+  summary: "V4 model: predicted one constant price per day, the mean of known history. Confirmed that some intraday shape is required to earn anything from day-ahead arbitrage."
+  strength: "—"
+  weakness: "—"
+  learns: "Dropped — never beat the naive models on revenue"
+  dropped: true

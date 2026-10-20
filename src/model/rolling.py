@@ -21,8 +21,15 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import REPO_ROOT, AssumptionsConfig, MarketPriceBasisConfig, MarketTimingConfig, PathsConfig, SolverConfig
-from src.data.forecast_loader import DayPricePair, DayPrices, SkipRecord, load_forecast_run_ids, load_price_pair_range
-from src.model.build import AncillaryInputs, terminal_value_eur_mwh
+from src.data.forecast_loader import (
+    DayPricePair,
+    DayPrices,
+    SkipRecord,
+    load_forecast_run_ids,
+    load_price_pair_range,
+    resolve_per_market_models,
+)
+from src.model.build import FCR_POWER_FACTOR, AncillaryInputs, terminal_value_eur_mwh
 from src.model.battery import Battery
 from src.model.solve import SolveResult
 from src.valuation.revenue import RevenueBreakdown, compute_revenue
@@ -45,8 +52,7 @@ class RollingRunResult:
 
 
 def day_to_long_rows(solve_id: str, day_prices: DayPrices, result: SolveResult, e_is_assumption: bool) -> list[dict]:
-    """Shared by run_rolling and benchmarks.py (day-ahead-only and naive
-    strategies also need this exact schema for a fair, uniform comparison).
+    """One long-format row per decision variable and step, shared by every strategy.
     `e_is_assumption` should be True only when ancillary markets AND
     activation-in-SOC are both in play for this result (see SPEC.md Hard
     Rule 2 note on 'e' below).
@@ -250,13 +256,24 @@ def run_rolling(
         # are used, and they never reach the solver subprocess above.
         # The terminal credit lambda is decision-side (what the solver
         # valued leftover energy at), so it is derived from decision prices.
+        terminal_lambda = terminal_value_eur_mwh(battery, pair.decision.day_ahead, cyclic_soc)
         revenue = compute_revenue(
             result, pair.settlement.day_ahead, pair.settlement.grid.delta_t_hours, _ancillary_for(pair.settlement),
             battery=battery,
-            terminal_value_eur_mwh=terminal_value_eur_mwh(battery, pair.decision.day_ahead, cyclic_soc),
+            terminal_value_eur_mwh=terminal_lambda,
+        )
+        # What the same decision is worth at the prices it was decided on
+        # (forecast price x forecast decision). For perfect foresight the
+        # decision and settlement prices are the same, so this equals `revenue`.
+        expected = compute_revenue(
+            result, pair.decision.day_ahead, pair.decision.grid.delta_t_hours, _ancillary_for(pair.decision),
+            battery=battery,
+            terminal_value_eur_mwh=terminal_lambda,
         )
         long_rows.extend(day_to_long_rows(solve_id, pair.decision, result, e_is_assumption))
-        daily_revenue_rows.append(revenue_to_row(pair.day, revenue, result, pair.settlement.grid.delta_t_hours))
+        daily_revenue_rows.append(
+            revenue_to_row(pair.day, revenue, result, pair.settlement.grid.delta_t_hours, expected=expected)
+        )
 
     long_format = pd.DataFrame(long_rows, columns=LONG_FORMAT_COLUMNS)
     daily_revenue = pd.DataFrame(daily_revenue_rows)
@@ -267,11 +284,21 @@ def run_rolling(
     )
 
 
-def revenue_to_row(day: dt.date, revenue: RevenueBreakdown, result: SolveResult, delta_t_hours: float) -> dict:
+EXPECTED_COLUMNS = ["day_ahead", "fcr", "afrr_pos", "afrr_neg", "activation", "gross", "degradation", "net"]
+
+
+def revenue_to_row(
+    day: dt.date, revenue: RevenueBreakdown, result: SolveResult, delta_t_hours: float,
+    expected: RevenueBreakdown | None = None,
+) -> dict:
     """`total` is NET revenue (gross - degradation), kept under its old name
     so consumers of daily_revenue.parquet keep meaning "what the battery
-    earned". `terminal_credit` is a decision-side value and is not in `net`."""
-    return {
+    earned". `terminal_credit` is a decision-side value and is not in `net`.
+
+    Unprefixed columns are REALIZED: the decision settled on real prices.
+    `expected_*` columns (when `expected` is given) are the same decision
+    valued at the prices it was decided on."""
+    row = {
         "solve_date": day,
         "day_ahead": revenue.day_ahead,
         "fcr": revenue.fcr,
@@ -287,6 +314,10 @@ def revenue_to_row(day: dt.date, revenue: RevenueBreakdown, result: SolveResult,
         "charged_mwh": float(result.p_ch.sum() * delta_t_hours),
         "discharged_mwh": float(result.p_dis.sum() * delta_t_hours),
     }
+    if expected is not None:
+        for column in EXPECTED_COLUMNS:
+            row[f"expected_{column}"] = float(getattr(expected, column))
+    return row
 
 
 def _git_commit() -> str | None:
@@ -312,10 +343,16 @@ def build_run_meta(
     cyclic_soc: bool = True,
     enforce_exclusivity: bool = True,
     include_activation_in_soc: bool = True,
+    study_name: str | None = None,
 ) -> dict:
     """Assembles the run_meta.json sidecar (SPEC.md §6a / Milestone 8
     Part B) — the one record src/results_catalogue.py's scan_runs reads
     per run, and what batch.py fingerprints against for resumability.
+
+    `study_name` (PLAN_V5_REVISION.md V5-6) labels which study.yaml this
+    run belongs to, for the dashboard/export_runs.py to group by. It is
+    NOT part of the batch fingerprint: the study's name doesn't change a
+    run's physics or config, so it must not force a re-solve.
     """
     dr = result.daily_revenue
     gross_eur = float(dr["gross"].sum()) if not dr.empty else 0.0
@@ -328,8 +365,14 @@ def build_run_meta(
         if result.decision_source == "forecast" and result.forecast_model is not None
         else {}
     )
+    forecast_models = (
+        resolve_per_market_models(result.forecast_model)
+        if result.decision_source == "forecast" and result.forecast_model is not None
+        else {}
+    )
     return {
         "solve_id": result.solve_id,
+        "study": study_name,
         "strategy": strategy,
         "decision_source": result.decision_source,
         "forecast_model": result.forecast_model,
@@ -356,6 +399,7 @@ def build_run_meta(
             "mip_gap": solver_config.mip_gap,
             "time_limit_seconds": solver_config.time_limit_seconds,
         },
+        "model": {"fcr_power_factor": FCR_POWER_FACTOR},
         "model_flags": {
             "cyclic_soc": cyclic_soc,
             "enforce_exclusivity": enforce_exclusivity,
@@ -369,6 +413,7 @@ def build_run_meta(
             "afrr_reserve_hours": assumptions.afrr_reserve_hours,
         },
         "price_basis": dict(price_basis.basis_by_market),
+        "market_prices": {"bid_granularity_mw": dict(price_basis.bid_granularity_mw)},
         "gross_revenue_eur": gross_eur,
         "degradation_cost_eur": degradation_eur,
         "net_revenue_eur": net_eur,
@@ -376,6 +421,7 @@ def build_run_meta(
         "equivalent_full_cycles": equivalent_full_cycles,
         "forecast_repo_path": str(paths_config.forecast_repo_path),
         "forecast_run_ids": forecast_run_ids,
+        "forecast_models": forecast_models,
         "git_commit": _git_commit(),
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
@@ -396,6 +442,7 @@ def write_rolling_run_results(
     cyclic_soc: bool = True,
     enforce_exclusivity: bool = True,
     include_activation_in_soc: bool = True,
+    study_name: str | None = None,
 ) -> None:
     """Persists a run's outputs under results/. Kept separate from
     run_rolling itself so the solve logic stays testable without disk I/O.
@@ -423,6 +470,7 @@ def write_rolling_run_results(
     meta = build_run_meta(
         result, strategy, start_date, end_date, battery, solver_config, assumptions, price_basis, paths_config,
         cyclic_soc=cyclic_soc, enforce_exclusivity=enforce_exclusivity, include_activation_in_soc=include_activation_in_soc,
+        study_name=study_name,
     )
     with open(run_dir / "run_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

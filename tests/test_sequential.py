@@ -1,17 +1,19 @@
 """Gate-ordered (sequential) clearing: FCR -> aFRR -> DA."""
 import datetime as dt
+import json
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from dispatch_helpers import (
-    ASSUMPTIONS, BATTERY, NORMAL_DAY, PRICE_BASIS, SOLVER, block_prices, grid_for, random_day_ahead,
+from tests.dispatch_helpers import (
+    ASSUMPTIONS, BATTERY, NORMAL_DAY, PRICE_BASIS, SOLVER, TIMINGS, block_prices, grid_for, random_day_ahead,
 )
 from src.batch import build_matrix
-from src.config import MarketTimingConfig, PathsConfig
+from src.config import MarketTimingConfig, PathsConfig, load_paths_config
 from src.data.forecast_loader import load_price_pair_range
 from src.model.build import AncillaryInputs, FixedReserves, build_model
+from src.model.rolling import run_rolling, write_rolling_run_results
 from src.model.sequential import solve_day_sequential
 from src.model.solve import solve_model
 
@@ -221,13 +223,6 @@ def test_batch_matrix_has_a_perfect_foresight_run_for_full_sequential():
 # ---- end to end on real data --------------------------------------------------
 
 def test_run_rolling_sequential_end_to_end_on_real_data(tmp_path):
-    from dispatch_helpers import TIMINGS
-    from src.config import load_paths_config
-    from src.model.rolling import run_rolling, write_rolling_run_results
-    import json
-
-    from dispatch_helpers import PRICE_BASIS
-
     paths = load_paths_config()
     day = dt.date(2026, 6, 15)
     kwargs = dict(
@@ -250,9 +245,6 @@ def test_run_rolling_sequential_end_to_end_on_real_data(tmp_path):
 
 
 def test_da_proxy_requires_ancillary_markets():
-    from dispatch_helpers import TIMINGS
-    from src.model.rolling import run_rolling
-
     with pytest.raises(ValueError, match="requires include_ancillary"):
         run_rolling(
             start_date=NORMAL_DAY, end_date=NORMAL_DAY, battery=BATTERY, solver_config=SOLVER,
@@ -263,9 +255,6 @@ def test_da_proxy_requires_ancillary_markets():
 
 
 def test_da_proxy_requires_sequential_flag():
-    from dispatch_helpers import TIMINGS
-    from src.model.rolling import run_rolling
-
     with pytest.raises(ValueError, match="only applies to sequential"):
         run_rolling(
             start_date=NORMAL_DAY, end_date=NORMAL_DAY, battery=BATTERY, solver_config=SOLVER,
@@ -277,9 +266,6 @@ def test_da_proxy_requires_sequential_flag():
 
 
 def _real_kwargs(day):
-    from dispatch_helpers import TIMINGS
-    from src.config import load_paths_config
-
     return dict(
         start_date=day, end_date=day, battery=BATTERY, solver_config=SOLVER, assumptions=ASSUMPTIONS,
         price_basis=PRICE_BASIS, day_ahead_timing=TIMINGS["day_ahead"], capacity_timing=TIMINGS["fcr"],
@@ -289,8 +275,6 @@ def _real_kwargs(day):
 
 def test_perfect_foresight_sequential_matches_full_cooptimized_on_real_prices():
     """Every stage sees the real prices, so gate ordering costs nothing."""
-    from src.model.rolling import run_rolling
-
     kwargs = _real_kwargs(dt.date(2026, 6, 15))
     sim = run_rolling(**kwargs)
     seq = run_rolling(sequential=True, **kwargs)
@@ -298,8 +282,6 @@ def test_perfect_foresight_sequential_matches_full_cooptimized_on_real_prices():
 
 
 def test_forecast_sequential_with_same_model_at_every_stage_matches_simultaneous():
-    from src.model.rolling import run_rolling
-
     kwargs = _real_kwargs(dt.date(2026, 6, 15)) | dict(
         decision_source="forecast", forecast_model="lgbm_point", forecast_quantile=0.5,
     )

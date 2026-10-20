@@ -21,6 +21,7 @@ from src.config import (
     load_paths_config,
     load_solver_config,
 )
+from src.data.forecast_loader import MEDIAN_QUANTILE
 from src.model.battery import Battery, battery_from_config
 from src.model.rolling import RollingRunResult, write_rolling_run_results
 from src.valuation.benchmarks import run_all_benchmarks
@@ -142,7 +143,6 @@ def main(argv: list[str] | None = None) -> None:
              "but still settles revenue on y_true (SPEC.md §6a).",
     )
     parser.add_argument("--forecast-model", default=None, help="Required when --decision-source=forecast.")
-    parser.add_argument("--forecast-quantile", type=float, default=0.5)
     parser.add_argument(
         "--write-results", action="store_true",
         help="Persist each strategy's run to results/<solve_id>/ (long_format.parquet, "
@@ -164,14 +164,15 @@ def main(argv: list[str] | None = None) -> None:
     print(format_battery_banner(battery))
     print(f"Run window: {args.start_date} to {args.end_date}")
     print(f"Decision source: {args.decision_source}"
-          + (f" (model={args.forecast_model}, quantile={args.forecast_quantile})" if args.decision_source == "forecast" else "")
+          + (f" (model={args.forecast_model})" if args.decision_source == "forecast" else "")
           + "\n")
 
     results = run_all_benchmarks(
-        args.start_date, args.end_date, battery, solver, assumptions, price_basis,
-        timings["day_ahead"], timings["fcr"], paths_config=paths,
+        start_date=args.start_date, end_date=args.end_date, battery=battery, solver_config=solver,
+        assumptions=assumptions, price_basis=price_basis,
+        day_ahead_timing=timings["day_ahead"], capacity_timing=timings["fcr"], paths_config=paths,
         decision_source=args.decision_source, forecast_model=args.forecast_model,
-        forecast_quantile=args.forecast_quantile if args.decision_source == "forecast" else None,
+        forecast_quantile=MEDIAN_QUANTILE if args.decision_source == "forecast" else None,
     )
     delta_t_hours = timings["day_ahead"].product_length_hours
     for name, result in results.items():

@@ -35,11 +35,14 @@ def test_load_market_timing_configs_reads_real_sibling_file():
     assert day_ahead.product_length_hours == 0.25
     assert day_ahead.timezone == "Europe/Berlin"
     assert day_ahead.delivery_start_local == dt.time(0, 0)
+    assert day_ahead.gate_closure_local == dt.time(12, 0)
+    assert day_ahead.gate_closure_offset_days == -1
 
     for market in ("fcr", "afrr_pos", "afrr_neg"):
         cfg = configs[market]
         assert cfg.dst_convention == "fixed_period_count"
         assert cfg.product_length_hours == 4.0
+        assert cfg.gate_closure_offset_days == -1
 
 
 def test_market_timing_config_rejects_invalid_dst_convention():

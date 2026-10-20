@@ -8,3 +8,10 @@
 # Resolved relative to this repo's root (the parent of config/).
 
 forecast_repo_path: ../bess-market-forecast
+
+# The forecast repo's own venv interpreter (PLAN_V5_REVISION.md V5-7): its
+# dependencies (entsoe-py, lightgbm, ...) differ from this repo's, so
+# pipeline/01_ingest.py and 02_backtest_forecasts.py run it in a subprocess
+# with THIS python, cwd set to that repo, instead of importing its code
+# in-process.
+forecast_venv_python: ../bess-market-forecast/.venv/Scripts/python.exe

@@ -1,8 +1,7 @@
-"""Dispatch Explorer: pick a forecast model, quantile, strategy, and date
-window; see the day-ahead forecast fan, the battery's dispatch/SOC, its
-ancillary capacity commitments, and daily/cumulative revenue against the
-matching perfect-foresight run over the same window (SPEC.md §6a: decide
-on forecast, settle on realized).
+"""Dispatch Explorer: pick a forecast model, strategy, and date window; see
+the day-ahead forecast, the battery's dispatch/SOC, its ancillary capacity
+commitments, and daily revenue next to the matching perfect-foresight run
+over the same days (SPEC.md §6a: decide on forecast, settle on realized).
 """
 import sys
 from pathlib import Path
@@ -15,8 +14,11 @@ for _p in (_APP_DIR, _APP_DIR.parent):
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
-from analysis import revenue_split
+import ui
+from analysis import common_days, revenue_split, stacked_bars
 from data_loader import (
     load_daily_revenue,
     load_forecast_prices,
@@ -29,7 +31,7 @@ from data_loader import (
 
 st.title("Dispatch Explorer")
 
-catalogue = load_run_catalogue()
+catalogue = ui.study_filter(load_run_catalogue())
 if catalogue.empty:
     st.warning(
         "No runs found in `results/`. Solve one first, e.g. `python -m src.batch --dry-run` "
@@ -39,23 +41,18 @@ if catalogue.empty:
 
 forecast_rows = catalogue[catalogue["decision_source"] == "forecast"]
 if forecast_rows.empty:
-    st.warning("No forecast-driven runs found yet -- only perfect-foresight runs are on disk so far.")
+    st.warning("No forecast-driven runs found yet -- only ceiling (real-price) runs are on disk so far.")
     st.stop()
 
 models = sorted(forecast_rows["forecast_model"].dropna().unique())
 model = st.sidebar.selectbox("Model", models)
+with st.sidebar:
+    ui.model_card(model)
 
-quantiles = sorted(forecast_rows.loc[forecast_rows["forecast_model"] == model, "forecast_quantile"].dropna().unique())
-quantile = st.sidebar.selectbox("Quantile", quantiles)
-
-strategies = sorted(
-    forecast_rows.loc[
-        (forecast_rows["forecast_model"] == model) & (forecast_rows["forecast_quantile"] == quantile), "strategy",
-    ].unique()
-)
+strategies = sorted(forecast_rows.loc[forecast_rows["forecast_model"] == model, "strategy"].unique())
 strategy = st.sidebar.selectbox("Strategy", strategies)
 
-runs = matching_runs(catalogue, strategy, "forecast", model, quantile)
+runs = matching_runs(catalogue, strategy, "forecast", model)
 if len(runs) > 1:
     labels = [f"{r.start_date} to {r.end_date}  (solve_id={r.solve_id[:8]}…, {r.created_at})" for r in runs.itertuples()]
     picked = st.sidebar.selectbox("Run (multiple solved for this combination)", range(len(runs)), format_func=lambda i: labels[i])
@@ -93,7 +90,7 @@ perfect_row = perfect_match.iloc[0] if not perfect_match.empty else None
 
 if perfect_row is None:
     st.info(
-        f"No perfect-foresight run found for {strategy} over {start_date}..{end_date} -- "
+        f"No ceiling (real-price) run found for {strategy} over {start_date}..{end_date} -- "
         "revenue panel will show the forecast-driven run only. Solve one with the same "
         "--start-date/--end-date and --decision-source=realized to enable the comparison."
     )
@@ -108,6 +105,11 @@ pf_window = (
     if not perfect_daily.empty
     else perfect_daily
 )
+if not pf_window.empty:
+    # The two runs can skip different days; compare only days both solved.
+    shared_days = common_days(dr_window, pf_window)
+    dr_window = dr_window[dr_window["solve_date"].isin(shared_days)]
+    pf_window = pf_window[pf_window["solve_date"].isin(shared_days)]
 
 fan = load_forecast_prices(model)
 if not fan.empty:
@@ -117,27 +119,48 @@ else:
 
 wide = pivot_long_format(lf_window)
 
-fig, axes = plt.subplots(4, 1, sharex=True, figsize=(14, 10))
+capacity_rows = lf_window[lf_window["variable"].isin(["c_fcr", "c_pos", "c_neg"])]
+# FCR is paid per 4-hour block, aFRR per hour: separate panels so each axis has one unit.
+RESERVE_PANELS = (
+    ("FCR", "EUR/MW per 4h block", (("fcr", "tab:purple", "FCR"),)),
+    ("aFRR", "EUR/MW per hour", (("afrr_pos", "tab:orange", "aFRR+"), ("afrr_neg", "tab:cyan", "aFRR-"))),
+)
+n_panels = 6 if not capacity_rows.empty else 4
+ratios = [2, 1.5, 1.5, 2, 1.5, 2] if n_panels == 6 else [2, 2, 1.5, 2]
+fig, axes = plt.subplots(n_panels, 1, sharex=True, figsize=(14, 3 * n_panels), gridspec_kw={"height_ratios": ratios})
+axes = iter(axes)
 
-# --- Panel 1: day-ahead price -- decision (forecast fan) vs settlement (realized) ---
-ax = axes[0]
+# --- Panel 1: day-ahead price -- decision (median forecast) vs settlement (realized) ---
+ax = next(axes)
 if fan_window.empty:
     ax.text(0.5, 0.5, "No forecast data for this model/window", ha="center", va="center", transform=ax.transAxes)
 else:
     x = fan_window.index
-    if "q_0.05" in fan_window.columns and "q_0.95" in fan_window.columns and fan_window["q_0.05"].notna().any():
-        ax.fill_between(x, fan_window["q_0.05"], fan_window["q_0.95"], color="tab:blue", alpha=0.15, label="5-95% interval")
-    if "q_0.25" in fan_window.columns and "q_0.75" in fan_window.columns and fan_window["q_0.25"].notna().any():
-        ax.fill_between(x, fan_window["q_0.25"], fan_window["q_0.75"], color="tab:blue", alpha=0.3, label="25-75% interval")
-    if "q_0.5" in fan_window.columns:
-        ax.plot(x, fan_window["q_0.5"], color="tab:blue", linewidth=1.5, label="median forecast (decision)")
+    ax.plot(x, fan_window["forecast"], color="tab:blue", linewidth=1.5, label="forecast (decision)")
     ax.plot(x, fan_window["y_true"], color="black", linewidth=1.3, linestyle="--", label="realized (settlement)")
     ax.legend(loc="upper left", fontsize=8)
 ax.set_ylabel("EUR/MWh")
-ax.set_title(f"Day-ahead price — {model} q{quantile}")
+ax.set_title(f"Day-ahead price — {model}")
+
+# --- Panels 1b/1c: reserve capacity prices (4h blocks), only when the strategy sells capacity ---
+if n_panels == 6:
+    timings = load_timings()
+    for title, unit, markets in RESERVE_PANELS:
+        ax = next(axes)
+        for market, color, label in markets:
+            prices = load_forecast_prices(model, market)
+            prices = prices[(prices.index.date >= window_start) & (prices.index.date <= window_end)]
+            if prices.empty:
+                continue
+            edges = list(prices.index) + [prices.index[-1] + pd.Timedelta(hours=timings[market].product_length_hours)]
+            ax.stairs(prices["forecast"].values, edges, baseline=None, color=color, linewidth=1.8, label=f"{label} forecast")
+            ax.stairs(prices["y_true"].values, edges, baseline=None, color=color, linewidth=1.2, linestyle="--", label=f"{label} real")
+        ax.legend(loc="upper left", fontsize=8, ncol=2)
+        ax.set_ylabel(unit)
+        ax.set_title(f"{title} capacity price: forecast (solid) vs real (dashed)")
 
 # --- Panel 2: battery dispatch + SOC ---
-ax = axes[1]
+ax = next(axes)
 ax_soc = ax.twinx()
 lines, labels = [], []
 if "p_ch" in wide.columns:
@@ -156,8 +179,7 @@ ax.legend(lines, [l.get_label() for l in lines], loc="upper left", fontsize=8)
 ax.set_title("Battery dispatch and state of charge")
 
 # --- Panel 3: ancillary capacity commitments ---
-ax = axes[2]
-capacity_rows = lf_window[lf_window["variable"].isin(["c_fcr", "c_pos", "c_neg"])]
+ax = next(axes)
 if capacity_rows.empty:
     ax.text(0.5, 0.5, "No ancillary capacity commitments for this strategy", ha="center", va="center", transform=ax.transAxes)
     ax.set_yticks([])
@@ -172,26 +194,37 @@ else:
 ax.set_ylabel("MW")
 ax.set_title("Ancillary capacity commitments (per 4h block)")
 
-# --- Panel 4: daily + cumulative revenue, forecast-driven vs perfect-foresight ---
-ax = axes[3]
-ax_cum = ax.twinx()
-fc_x = pd.to_datetime(dr_window["solve_date"])
-fc_y = dr_window["total"].to_numpy()
-offset = pd.Timedelta(hours=6)
-bar_lines, bar_labels = [], []
-b1 = ax.bar(fc_x - offset if not pf_window.empty else fc_x, fc_y, width=0.35, color="tab:blue", label="forecast-driven (daily)")
-c1, = ax_cum.plot(fc_x, fc_y.cumsum(), color="tab:blue", linewidth=2, label="forecast-driven (cumulative)")
-bar_lines += [b1, c1]
-if not pf_window.empty:
-    pf_x = pd.to_datetime(pf_window["solve_date"])
-    pf_y = pf_window["total"].to_numpy()
-    b2 = ax.bar(pf_x + offset, pf_y, width=0.35, color="tab:gray", label="perfect foresight (daily)")
-    c2, = ax_cum.plot(pf_x, pf_y.cumsum(), color="black", linewidth=2, linestyle="--", label="perfect foresight (cumulative)")
-    bar_lines += [b2, c2]
+# --- Panel 4: daily revenue by market, forecast-driven next to the ceiling (hatched) ---
+ax = next(axes)
+COMPONENT_COLORS = {
+    "day_ahead": "tab:blue", "fcr": "tab:purple", "afrr_pos": "tab:orange", "afrr_neg": "tab:cyan", "activation": "tab:green",
+}
+COMPONENT_LABELS = {"day_ahead": "day-ahead", "fcr": "FCR", "afrr_pos": "aFRR+", "afrr_neg": "aFRR-", "activation": "aFRR activation"}
+bar_width = pd.Timedelta(hours=9)  # two bars per day, touching, leaving a gap before the next day
+
+
+def _draw_stack(frame: pd.DataFrame, offset: pd.Timedelta, **style) -> None:
+    x = pd.to_datetime(frame["solve_date"]) + offset
+    for component, (bottom, height) in stacked_bars(frame).items():
+        ax.bar(x, height, bottom=bottom, width=bar_width, color=COMPONENT_COLORS[component], **style)
+    # net = gross - degradation: degradation is a cost, not a market, so it is a tick rather than a segment.
+    ax.hlines(frame["net"], x - bar_width / 2, x + bar_width / 2, color="black", linewidth=2)
+
+
+if pf_window.empty:
+    _draw_stack(dr_window, pd.Timedelta(0))
+else:
+    _draw_stack(dr_window, -bar_width / 2)
+    _draw_stack(pf_window, bar_width / 2, hatch="///", edgecolor="white", linewidth=0)
+ax.axhline(0, color="grey", linewidth=0.5)
 ax.set_ylabel("EUR / day")
-ax_cum.set_ylabel("EUR cumulative")
-ax.legend(bar_lines, [h.get_label() for h in bar_lines], loc="upper left", fontsize=8)
-ax.set_title("Net revenue (gross minus degradation)")
+handles = [Patch(facecolor=COMPONENT_COLORS[c], label=COMPONENT_LABELS[c]) for c in COMPONENT_COLORS]
+handles.append(Line2D([], [], color="black", linewidth=2, label="net (after degradation)"))
+if not pf_window.empty:
+    handles.append(Patch(facecolor="lightgrey", hatch="///", edgecolor="white", label="ceiling, real prices (right bar)"))
+ax.margins(y=0.3)  # headroom so the legend clears the tallest bars
+ax.legend(handles=handles, loc="upper left", fontsize=8, ncol=4)
+ax.set_title("Daily revenue by market: forecast-driven (left) vs ceiling, real prices (right)")
 ax.set_xlabel("Delivery time")
 
 fig.autofmt_xdate()
@@ -207,5 +240,5 @@ def _split_text(frame: pd.DataFrame) -> str:
 
 st.caption(
     f"{len(dr_window)} day(s) shown | forecast-driven: {_split_text(dr_window)}"
-    + (f" | perfect foresight: {_split_text(pf_window)}" if not pf_window.empty else "")
+    + (f" | ceiling, real prices: {_split_text(pf_window)}" if not pf_window.empty else "")
 )

@@ -8,23 +8,12 @@ import json
 import pytest
 
 import src.model.rolling as rolling
-from src.config import (
-    load_assumptions_config,
-    load_battery_config,
-    load_market_price_basis_config,
-    load_market_timing_configs,
-    load_paths_config,
-    load_solver_config,
-)
-from src.model.battery import battery_from_config
+from src.config import load_forecast_blends_config, load_paths_config
+from src.data.forecast_loader import load_forecast_run_ids
 from src.model.rolling import run_rolling, write_rolling_run_results
+from tests.dispatch_helpers import ASSUMPTIONS, BATTERY, PRICE_BASIS, SOLVER, TIMINGS
 
 PATHS = load_paths_config()
-TIMINGS = load_market_timing_configs(PATHS)
-BATTERY = battery_from_config(load_battery_config())
-SOLVER = load_solver_config()
-ASSUMPTIONS = load_assumptions_config()
-PRICE_BASIS = load_market_price_basis_config()
 
 START = END = dt.date(2026, 6, 15)
 
@@ -88,6 +77,7 @@ def test_run_meta_carries_every_field_for_a_forecast_driven_run(tmp_path):
         "afrr_reserve_hours": ASSUMPTIONS.afrr_reserve_hours,
     }
     assert meta["price_basis"] == dict(PRICE_BASIS.basis_by_market)
+    assert meta["market_prices"] == {"bid_granularity_mw": dict(PRICE_BASIS.bid_granularity_mw)}
     dr = result.daily_revenue
     assert meta["gross_revenue_eur"] == pytest.approx(float(dr["gross"].sum()))
     assert meta["degradation_cost_eur"] == pytest.approx(float(dr["degradation"].sum()))
@@ -100,6 +90,9 @@ def test_run_meta_carries_every_field_for_a_forecast_driven_run(tmp_path):
 
     # One (market, model) pair per parquet file in the sibling repo (Verified facts).
     assert set(meta["forecast_run_ids"].keys()) == {"day_ahead", "fcr", "afrr_pos", "afrr_neg"}
+    assert meta["forecast_models"] == {
+        "day_ahead": "lgbm_point", "fcr": "lgbm_point", "afrr_pos": "lgbm_point", "afrr_neg": "lgbm_point",
+    }
 
     assert meta["created_at"]  # non-empty ISO timestamp; exact value isn't worth pinning
 
@@ -110,6 +103,18 @@ def test_run_meta_has_empty_forecast_run_ids_for_a_perfect_foresight_run(tmp_pat
     assert meta["forecast_model"] is None
     assert meta["forecast_quantile"] is None
     assert meta["forecast_run_ids"] == {}
+    assert meta["forecast_models"] == {}
+
+
+def test_run_meta_forecast_models_expands_a_blend(tmp_path):
+    """PLAN_V4_REVISION.md section 3: forecast_model stays the flat blend
+    name, but forecast_models/forecast_run_ids resolve it per market."""
+    _, meta = _write(tmp_path, decision_source="forecast", forecast_model="per_market_best", forecast_quantile=0.5)
+    assert meta["forecast_model"] == "per_market_best"
+    # Reads the real, current mapping (PLAN_V6_REVISION.md V6-4 regenerates
+    # it from validation-window MAE) rather than hardcoding model names.
+    assert meta["forecast_models"] == load_forecast_blends_config().resolve("per_market_best")
+    assert meta["forecast_run_ids"] == load_forecast_run_ids(PATHS, "per_market_best")
 
 
 def test_run_meta_is_written_last(tmp_path, monkeypatch):

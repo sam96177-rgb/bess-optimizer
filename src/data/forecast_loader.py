@@ -22,12 +22,20 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from src.config import _REQUIRED_MARKETS, MarketTimingConfig, PathsConfig, load_paths_config
+from src.config import (
+    _REQUIRED_MARKETS,
+    MarketTimingConfig,
+    PathsConfig,
+    load_forecast_blends_config,
+    load_paths_config,
+)
 from src.data.grid import DayGrid, build_day_grid
 
 logger = logging.getLogger(__name__)
 
-DA_PROXY_QUANTILE = 0.5
+# Only the median is ever solved: every registered forecast model is a point model.
+# `forecast_quantile` stays a parameter (and is recorded in run_meta.json) for provenance.
+MEDIAN_QUANTILE = 0.5
 
 
 @dataclass(frozen=True)
@@ -101,7 +109,9 @@ def load_raw_y_true(paths_config: PathsConfig) -> pd.Series:
 
 def load_raw_y_pred(paths_config: PathsConfig, model: str, quantile: float) -> pd.Series:
     """One predicted price per (market, target_time), for a single
-    forecasting model at a single quantile.
+    forecasting model at a single quantile -- or, if `model` names a
+    config/forecast_blends.yaml blend, its per-market model instead (each
+    market's slice from its own model, same guards, same MultiIndex shape).
 
     Unlike y_true, y_pred genuinely differs per model and per quantile, so
     this filters rather than collapses. Verified against the real results:
@@ -118,6 +128,10 @@ def load_raw_y_pred(paths_config: PathsConfig, model: str, quantile: float) -> p
     day with a legible reason, which is also what src/model/build.py's own
     NaN guards require.
     """
+    blend = load_forecast_blends_config().resolve(model)
+    if blend is not None:
+        return _load_raw_y_pred_blend(paths_config, blend, quantile)
+
     files = sorted(paths_config.results_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {paths_config.results_dir}")
@@ -159,9 +173,32 @@ def load_raw_y_pred(paths_config: PathsConfig, model: str, quantile: float) -> p
     return selected.set_index(["market", "target_time"])["y_pred"].sort_index()
 
 
+def _load_raw_y_pred_blend(paths_config: PathsConfig, per_market: dict[str, str], quantile: float) -> pd.Series:
+    """One load_raw_y_pred call per DISTINCT underlying model (not one per
+    market, so a model used in three of the blend's four markets is only
+    read once), then each market's rows come from its own model's result --
+    load_raw_y_pred's own guards (all 4 markets present, one row per
+    market/target_time, NaNs kept) already ran once per underlying model.
+    """
+    by_model = {name: load_raw_y_pred(paths_config, name, quantile) for name in set(per_market.values())}
+    slices = [by_model[model].xs(market, level="market", drop_level=False) for market, model in per_market.items()]
+    return pd.concat(slices).sort_index()
+
+
+def resolve_per_market_models(model: str) -> dict[str, str]:
+    """The real model backing each market for `model`: its own per-market
+    dict if it names a config/forecast_blends.yaml blend, else itself
+    repeated across all four markets. Provenance only (run_meta.json's
+    forecast_models field) -- load_raw_y_pred resolves blends itself.
+    """
+    blend = load_forecast_blends_config().resolve(model)
+    return dict(blend) if blend is not None else {m: model for m in _REQUIRED_MARKETS}
+
+
 def load_forecast_run_ids(paths_config: PathsConfig, model: str) -> dict[str, str]:
     """One run_id per market for `model` — provenance only (run_meta.json's
-    forecast_run_ids field), not used in any price calculation.
+    forecast_run_ids field), not used in any price calculation. If `model`
+    names a blend, each market's run_id comes from its own underlying model.
 
     Verified against the real results: there are exactly 4 markets x 5
     models = 20 parquet files, one per (market, model) pair, and each
@@ -169,6 +206,10 @@ def load_forecast_run_ids(paths_config: PathsConfig, model: str) -> dict[str, st
     Asserted here rather than assumed, for the same reason as
     load_raw_y_pred's own uniqueness checks.
     """
+    blend = load_forecast_blends_config().resolve(model)
+    if blend is not None:
+        return {market: load_forecast_run_ids(paths_config, m)[market] for market, m in blend.items()}
+
     files = sorted(paths_config.results_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {paths_config.results_dir}")
@@ -268,7 +309,7 @@ def load_price_pair_range(
     """Decision and settlement prices for each day in the range.
 
     da_proxy_model (forecast runs only): also build `reserve_stage_decision`
-    for each day, using that model's day-ahead y_pred (at DA_PROXY_QUANTILE)
+    for each day, using that model's day-ahead y_pred (at the median)
     in place of forecast_model's. See DayPricePair.
 
     decision_source="realized" is the perfect-foresight case: both sides
@@ -298,7 +339,7 @@ def load_price_pair_range(
         if decision_source == "forecast"
         else raw_true
     )
-    raw_proxy = load_raw_y_pred(paths_config, da_proxy_model, DA_PROXY_QUANTILE) if da_proxy_model else None
+    raw_proxy = load_raw_y_pred(paths_config, da_proxy_model, MEDIAN_QUANTILE) if da_proxy_model else None
 
     pairs: list[DayPricePair] = []
     skipped: list[SkipRecord] = []

@@ -7,7 +7,7 @@ it only loads, validates, and fails loudly on what it finds.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -191,6 +191,10 @@ def load_solver_config(path: Path | None = None) -> SolverConfig:
 @dataclass(frozen=True)
 class MarketPriceBasisConfig:
     basis_by_market: dict[str, PriceBasis]
+    # MW increment a reserve bid must be a multiple of (PLAN_V4_REVISION.md
+    # section 4). 0 or absent means unconstrained -- day_ahead has no
+    # granularity entry in market_prices.yaml's older, flat-dict callers.
+    bid_granularity_mw: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         missing = _REQUIRED_MARKETS - self.basis_by_market.keys()
@@ -205,6 +209,9 @@ class MarketPriceBasisConfig:
             raise ValueError(
                 f"Invalid price_basis values (must be one of {sorted(_VALID_PRICE_BASES)}): {invalid}"
             )
+        negative = {m: g for m, g in self.bid_granularity_mw.items() if g < 0}
+        if negative:
+            raise ValueError(f"bid_granularity_mw must be >= 0: {negative}")
 
     def basis_for(self, market: str) -> PriceBasis:
         try:
@@ -212,16 +219,27 @@ class MarketPriceBasisConfig:
         except KeyError as e:
             raise KeyError(f"No price_basis configured for market '{market}'") from e
 
+    def granularity_for(self, market: str) -> float:
+        return self.bid_granularity_mw.get(market, 0.0)
+
 
 def load_market_price_basis_config(path: Path | None = None) -> MarketPriceBasisConfig:
     path = path or (CONFIG_DIR / "market_prices.yaml")
     data = _load_yaml(path)
-    return MarketPriceBasisConfig(basis_by_market=data)
+    return MarketPriceBasisConfig(
+        basis_by_market=data["price_basis"], bid_granularity_mw=data.get("bid_granularity_mw", {}),
+    )
 
 
 @dataclass(frozen=True)
 class PathsConfig:
     forecast_repo_path: Path
+    # PLAN_V5_REVISION.md V5-7: the forecast repo's own venv interpreter --
+    # its dependencies (entsoe-py, lightgbm, ...) differ from this repo's,
+    # so pipeline/01_ingest.py and 02_backtest_forecasts.py run it in a
+    # subprocess with THIS python, cwd set to that repo. Optional: most
+    # callers of load_paths_config() never touch it.
+    forecast_venv_python: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.forecast_repo_path.exists():
@@ -229,10 +247,19 @@ class PathsConfig:
                 f"forecast_repo_path does not exist: {self.forecast_repo_path}. "
                 "config/paths.yaml must point at the sibling bess-market-forecast checkout."
             )
+        if self.forecast_venv_python is not None and not self.forecast_venv_python.exists():
+            raise FileNotFoundError(
+                f"forecast_venv_python does not exist: {self.forecast_venv_python}. "
+                "config/paths.yaml must point at the sibling bess-market-forecast repo's own venv interpreter."
+            )
 
     @property
     def markets_yaml_path(self) -> Path:
         return self.forecast_repo_path / "config" / "markets.yaml"
+
+    @property
+    def study_yaml_path(self) -> Path:
+        return self.forecast_repo_path / "config" / "study.yaml"
 
     @property
     def results_dir(self) -> Path:
@@ -244,9 +271,123 @@ def load_paths_config(path: Path | None = None) -> PathsConfig:
     data = _load_yaml(path)
     if "forecast_repo_path" not in data:
         raise ValueError(f"{path} missing required key: forecast_repo_path")
-    raw = Path(data["forecast_repo_path"])
-    resolved = raw if raw.is_absolute() else (REPO_ROOT / raw).resolve()
-    return PathsConfig(forecast_repo_path=resolved)
+
+    def _resolve(raw: str) -> Path:
+        p = Path(raw)
+        return p if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+    resolved = _resolve(data["forecast_repo_path"])
+    venv_python = _resolve(data["forecast_venv_python"]) if "forecast_venv_python" in data else None
+    return PathsConfig(forecast_repo_path=resolved, forecast_venv_python=venv_python)
+
+
+@dataclass(frozen=True)
+class ForecastBlendsConfig:
+    """Named per-market model blends (PLAN_V4_REVISION.md section 3):
+    forecast_model stays a flat scalar everywhere (batch resume, skip-log
+    scanning, export, every dashboard page filter on it), so a blend is a
+    name that src.data.forecast_loader.load_raw_y_pred resolves into one
+    real model per market, not a dict passed around instead of the scalar.
+    """
+
+    blends: dict[str, dict[str, str]]
+
+    def __post_init__(self) -> None:
+        for name, per_market in self.blends.items():
+            missing = _REQUIRED_MARKETS - per_market.keys()
+            if missing:
+                raise ValueError(f"forecast_blends.yaml blend '{name}' missing required markets: {sorted(missing)}")
+
+    def resolve(self, name: str) -> dict[str, str] | None:
+        """None if `name` is an ordinary (non-blend) model name."""
+        return self.blends.get(name)
+
+
+def load_forecast_blends_config(path: Path | None = None) -> ForecastBlendsConfig:
+    path = path or (CONFIG_DIR / "forecast_blends.yaml")
+    data = _load_yaml(path)
+    return ForecastBlendsConfig(blends=data)
+
+
+@dataclass(frozen=True)
+class StudyWindow:
+    start: dt.date
+    end: dt.date
+
+    def __post_init__(self) -> None:
+        if self.end < self.start:
+            raise ValueError(f"study window end {self.end} is before start {self.start}")
+
+
+@dataclass(frozen=True)
+class StudyConfig:
+    """PLAN_V5_REVISION.md V5-6: the forecast repo's config/study.yaml,
+    read here via forecast_repo_path -- same direction as
+    load_market_timing_configs. Only this repo reads the `optimizer:`
+    block; the forecast repo ignores it."""
+
+    name: str
+    test_window: dict[str, StudyWindow]
+    models: list[str]
+    strategies: list[str]
+    blends: list[str]
+    history_start: dt.date | None = None
+    min_training_history_days: int | None = None
+    # PLAN_V6_REVISION.md V6-4: the 60 days right before each market's
+    # test_window start, read by pipeline/03_select_blend.py to pick
+    # per_market_best on validation-only MAE. None for a study.yaml
+    # predating V6-4.
+    validation_window: dict[str, StudyWindow] | None = None
+
+    @property
+    def optimization_window(self) -> tuple[dt.date, dt.date]:
+        """Intersection of every market's test window -- the range every
+        market actually has test-window data for, not restated."""
+        start = max(w.start for w in self.test_window.values())
+        end = min(w.end for w in self.test_window.values())
+        if end < start:
+            raise ValueError(
+                f"study '{self.name}': market test windows don't overlap "
+                f"(intersection would be {start}..{end})"
+            )
+        return start, end
+
+    @property
+    def optimizer_models(self) -> list[str]:
+        return self.models + self.blends
+
+
+def load_study_config(paths_config: PathsConfig | None = None) -> StudyConfig:
+    paths_config = paths_config or load_paths_config()
+    path = paths_config.study_yaml_path
+    data = _load_yaml(path)
+
+    required = {"name", "test_window", "models", "optimizer"}
+    missing = required - data.keys()
+    if missing:
+        raise ValueError(f"{path} missing required keys: {sorted(missing)}")
+
+    test_window = {
+        market: StudyWindow(start=window["start"], end=window["end"])
+        for market, window in data["test_window"].items()
+    }
+    validation_window = None
+    if "validation_window" in data:
+        validation_window = {
+            market: StudyWindow(start=window["start"], end=window["end"])
+            for market, window in data["validation_window"].items()
+        }
+    optimizer = data["optimizer"]
+    return StudyConfig(
+        name=str(data["name"]),
+        test_window=test_window,
+        models=list(data["models"]),
+        strategies=list(optimizer.get("strategies", [])),
+        blends=list(optimizer.get("blends", [])),
+        history_start=data["history_start"] if "history_start" in data else None,
+        min_training_history_days=data.get("min_training_history_days"),
+        validation_window=validation_window,
+    )
 
 
 @dataclass(frozen=True)
@@ -254,6 +395,10 @@ class MarketTimingConfig:
     """The subset of a market's bess-market-forecast markets.yaml entry
     that grid construction needs. Parsed live from that repo's own file
     (never duplicated as separate hardcoded numbers) — SPEC.md §1.
+
+    gate_closure_local/gate_closure_offset_days are display-only (the
+    PLAN_V5_1_REVISION.md dashboard overview's markets table); grid
+    construction has no notion of a bidding deadline.
     """
 
     name: str
@@ -261,6 +406,8 @@ class MarketTimingConfig:
     dst_convention: DstConvention
     product_length_hours: float
     delivery_start_local: dt.time
+    gate_closure_local: dt.time | None = None
+    gate_closure_offset_days: int | None = None
 
     def __post_init__(self) -> None:
         if self.dst_convention not in _VALID_DST_CONVENTIONS:
@@ -291,12 +438,15 @@ def load_market_timing_configs(paths_config: PathsConfig | None = None) -> dict[
         missing_fields = required_fields - entry.keys()
         if missing_fields:
             raise ValueError(f"{path}::{market} missing required keys: {sorted(missing_fields)}")
+        gate_closure_local = entry.get("gate_closure_local")
         configs[market] = MarketTimingConfig(
             name=market,
             timezone=str(entry["timezone"]),
             dst_convention=entry["dst_convention"],
             product_length_hours=float(entry["product_length_hours"]),
             delivery_start_local=dt.datetime.strptime(str(entry["delivery_start_local"]), "%H:%M").time(),
+            gate_closure_local=dt.datetime.strptime(str(gate_closure_local), "%H:%M").time() if gate_closure_local else None,
+            gate_closure_offset_days=entry.get("gate_closure_offset_days"),
         )
 
     day_ahead = configs["day_ahead"]
